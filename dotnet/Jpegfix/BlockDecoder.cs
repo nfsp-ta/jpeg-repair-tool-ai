@@ -13,7 +13,8 @@ sealed class State
     public double Rank, Cost;
     public int PY, PCb, PCr;
     public InsNode? Ins;
-    public byte[] McuPix = null!, EdgeBottom = null!, EdgeRight = null!;
+    public byte[] McuPix = null!, EdgeBottom = null!, EdgeRight = null!;      // McuPix: 4 luma blocks, then Cb, then Cr (384 bytes)
+    public byte[] CebCb = null!, CebCr = null!, CerCb = null!, CerCr = null!;   // chroma edges: bottom two rows per MCU column (2*Mx*8), right two columns of the previous MCU (16)
     public int[] AboveCb = null!, AboveCr = null!;
     public int LeftCb, LeftCr, CurCb;
     public State Clone() => (State)MemberwiseClone();
@@ -173,7 +174,18 @@ sealed class BlockDecoder
             int left = bi == 4 ? S.LeftCb : S.LeftCr; var above = bi == 4 ? S.AboveCb : S.AboveCr;
             if (mx > 0) { sum += Math.Abs(dc - left); cnt++; }
             if (my > 0) { sum += Math.Abs(dc - above[mx]); cnt++; }
-            cost = cnt != 0 ? sum / cnt / 8 : 0;
+            double dcCost = cnt != 0 ? sum / cnt / 8 : 0;
+            Idct();                                   // pixels are needed to keep chroma edges in the state
+            if (Tunables.Chroma == "dc") cost = dcCost;
+            else
+            {
+                var pix = R.Pix; var ceb = bi == 4 ? S.CebCb : S.CebCr; var cer = bi == 4 ? S.CerCb : S.CerCr; int CW = J.Mx * 8;
+                double ssum = 0; int scnt = 0;
+                if (my > 0) { for (int c = 0; c < 8; c++) { double t0 = ceb[mx * 8 + c], t1 = ceb[CW + mx * 8 + c]; ssum += Math.Abs((pix[c] - t0) - ((pix[8 + c] - pix[c]) + (t0 - t1)) / 2); } scnt += 8; }
+                if (mx > 0) { for (int r = 0; r < 8; r++) { double l0 = cer[r], l1 = cer[8 + r]; ssum += Math.Abs((pix[r * 8] - l0) - ((pix[r * 8 + 1] - pix[r * 8]) + (l0 - l1)) / 2); } scnt += 8; }
+                cost = (scnt != 0 ? ssum / scnt : 0) + over;
+                if (Tunables.Chroma == "both") cost += dcCost;
+            }
         }
         if (RefY != null)
         {
@@ -206,9 +218,13 @@ sealed class BlockDecoder
         if (bi < 4)
         {
             C.PY = R.Pred;
-            var mp = new byte[256]; if (bi != 0) Array.Copy(S.McuPix, mp, 256); Array.Copy(R.Pix, 0, mp, bi * 64, 64); C.McuPix = mp;
+            var mp = new byte[384]; if (bi != 0) Array.Copy(S.McuPix, mp, 256); Array.Copy(R.Pix, 0, mp, bi * 64, 64); C.McuPix = mp;
         }
-        else if (bi == 4) { C.PCb = R.Pred; C.CurCb = R.Dc; }
+        else if (bi == 4)
+        {
+            C.PCb = R.Pred; C.CurCb = R.Dc;
+            var mp = (byte[])S.McuPix.Clone(); Array.Copy(R.Pix, 0, mp, 256, 64); C.McuPix = mp;
+        }
         else
         {
             C.PCr = R.Pred;
@@ -225,6 +241,19 @@ sealed class BlockDecoder
                 er[16 + r] = mp[64 + r * 8 + 6]; er[16 + 8 + r] = mp[192 + r * 8 + 6];
             }
             C.EdgeBottom = eb; C.EdgeRight = er;
+            int CW = J.Mx * 8;
+            var cebCb = (byte[])S.CebCb.Clone(); var cebCr = (byte[])S.CebCr.Clone(); var cerCb = new byte[16]; var cerCr = new byte[16];
+            for (int c = 0; c < 8; c++)
+            {
+                cebCb[mx * 8 + c] = mp[256 + 56 + c]; cebCb[CW + mx * 8 + c] = mp[256 + 48 + c];
+                cebCr[mx * 8 + c] = R.Pix[56 + c]; cebCr[CW + mx * 8 + c] = R.Pix[48 + c];
+            }
+            for (int r = 0; r < 8; r++)
+            {
+                cerCb[r] = mp[256 + r * 8 + 7]; cerCb[8 + r] = mp[256 + r * 8 + 6];
+                cerCr[r] = R.Pix[r * 8 + 7]; cerCr[8 + r] = R.Pix[r * 8 + 6];
+            }
+            C.CebCb = cebCb; C.CebCr = cebCr; C.CerCb = cerCb; C.CerCr = cerCr;
             var ab = (int[])S.AboveCb.Clone(); ab[mx] = S.CurCb; C.AboveCb = ab; C.LeftCb = S.CurCb;
             var ar = (int[])S.AboveCr.Clone(); ar[mx] = R.Dc; C.AboveCr = ar; C.LeftCr = R.Dc;
         }
@@ -233,7 +262,8 @@ sealed class BlockDecoder
 
     public State InitialState() => new()
     {
-        McuPix = new byte[256], EdgeBottom = new byte[J.Mx * 32], EdgeRight = new byte[32],
+        McuPix = new byte[384], EdgeBottom = new byte[J.Mx * 32], EdgeRight = new byte[32],
+        CebCb = new byte[2 * J.Mx * 8], CebCr = new byte[2 * J.Mx * 8], CerCb = new byte[16], CerCr = new byte[16],
         AboveCb = new int[J.Mx], AboveCr = new int[J.Mx], RLast = -1,
     };
 }
