@@ -2,7 +2,7 @@ namespace Jpegfix;
 
 /// <summary>
 /// Benchmark: corrupt each clean JPEG in a directory (delete all 0x0D), repair it, and compare with the original.
-/// The statistics model is trained leave-one-out on the other files (per size kind, i.e. file-name prefix before '-').
+/// The statistics model is trained leave-one-out (by image id) on the loaded files; --kind only selects which files are evaluated.
 /// </summary>
 static class Bench
 {
@@ -17,21 +17,15 @@ static class Bench
     /// <summary>Scorer diagnostic over a directory: how often does the true hypothesis beat all wrong ones, per parameter set?</summary>
     public static int RunDiag(string dir, string scope, string? kindFilter, int limit, int threads)
     {
-        var items = new List<(string Name, string Kind, byte[] Good)>();
-        foreach (var f in Directory.GetFiles(dir, "*.jpg").OrderBy(f => f, StringComparer.Ordinal))
-        {
-            var name = Path.GetFileName(f); var kind = name.Split('-')[0];
-            if (kindFilter != null && kind != kindFilter) continue;
-            var good = File.ReadAllBytes(f);
-            try { JpegParser.Parse(good); items.Add((name, kind, good)); } catch (InvalidDataException) { }
-        }
-        if (limit > 0 && items.Count > limit)
-            items = Enumerable.Range(0, limit).Select(i => items[(int)((long)i * items.Count / limit)]).ToList();
-        var loo = new LooModels(items.Select(i => (i.Good, i.Kind)).ToList(), scope);
+        var all = Corpus.Load(dir);
+        var ev = Corpus.Pick(all, kindFilter, limit);
+        var loo = new LooModels(all.Select(i => (i.Good, i.Kind, i.Id)).ToList(), scope);
+        Console.Error.WriteLine($"{ev.Count} evaluated files of {all.Count} loaded (model scope '{scope}')");
         var total = new Repairer.DiagStats(); var lk = new object();
-        Parallel.For(0, items.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, i =>
+        Parallel.For(0, ev.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, k =>
         {
-            var s = Repairer.Diagnose(items[i].Good, loo.For(i));
+            int i = ev[k];
+            var s = Repairer.Diagnose(all[i].Good, loo.For(i));
             lock (lk) total.Add(s);
         });
         string[] cn = { "needs-insertion luma", "needs-insertion chroma", "no-insertion luma", "no-insertion chroma" };
@@ -62,26 +56,16 @@ static class Bench
 
     public static int Run(string dir, int beam, double maxSeconds, string scope, string? kindFilter, int limit, int threads)
     {
-        var files = Directory.GetFiles(dir, "*.jpg").OrderBy(f => f, StringComparer.Ordinal).ToList();
-        var items = new List<(string Name, string Kind, byte[] Good, JpegInfo J)>();
-        foreach (var f in files)
-        {
-            var name = Path.GetFileName(f); var kind = name.Split('-')[0];
-            if (kindFilter != null && kind != kindFilter) continue;
-            var good = File.ReadAllBytes(f);
-            try { items.Add((name, kind, good, JpegParser.Parse(good))); }
-            catch (InvalidDataException ex) { Console.Error.WriteLine($"skip {name}: {ex.Message}"); }
-        }
-        if (limit > 0 && items.Count > limit)       // spread the sample evenly rather than taking the first N
-            items = Enumerable.Range(0, limit).Select(i => items[(int)((long)i * items.Count / limit)]).ToList();
-        Console.Error.WriteLine($"{items.Count} files, beam {beam}, model scope '{scope}', {maxSeconds}s limit, {threads} threads");
+        var all = Corpus.Load(dir);
+        var ev = Corpus.Pick(all, kindFilter, limit);
+        Console.Error.WriteLine($"{ev.Count} evaluated files of {all.Count} loaded, beam {beam}, model scope '{scope}', {maxSeconds}s limit, {threads} threads");
+        var loo = new LooModels(all.Select(i => (i.Good, i.Kind, i.Id)).ToList(), scope);
 
-        var loo = new LooModels(items.Select(i => (i.Good, i.Kind)).ToList(), scope);
-
-        var rows = new Row[items.Count];
-        Parallel.For(0, items.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, i =>
+        var rows = new Row[ev.Count];
+        Parallel.For(0, ev.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, k =>
         {
-            var (name, kind, good, J) = items[i];
+            int i = ev[k];
+            var (name, kind, _, good, J) = all[i];
             var model = loo.For(i);
             var bad = good.Where(b => b != 0x0D).ToArray();
             var truth = Repairer.TruthList(good);
@@ -99,7 +83,7 @@ static class Bench
                 row.Outcome = row.Identical ? "IDENTICAL" : res.TimedOut ? "timeout" : res.StuckAt >= 0 ? "stuck" : res.Verified ? "consistent-wrong" : "inconsistent";
             }
             catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { row.Outcome = "error: " + ex.Message; }
-            rows[i] = row;
+            rows[k] = row;
         });
 
         Console.WriteLine($"{"file",-18} {"blocks",6} {"reached",8} {"truth",5} {"found",5} {"match",9} {"sec",6}  outcome");
