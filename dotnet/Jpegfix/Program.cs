@@ -9,7 +9,7 @@ const string Usage = @"usage:
   jpegfix verify  a.jpg b.jpg
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
-  jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N]\n  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N]";
+  jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N]\n  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S]";
 
 try
 {
@@ -25,7 +25,11 @@ try
             return same ? 0 : 1;
         case "train" when args.Length >= 3:
             var m = new Model();
-            foreach (var f in args.Skip(2)) Repairer.Train(File.ReadAllBytes(f), m);
+            foreach (var f in args.Skip(2))
+            {
+                try { Repairer.Train(File.ReadAllBytes(f), m); }
+                catch (InvalidDataException ex) { Console.Error.WriteLine($"skip {f}: {ex.Message}"); }
+            }
             m.Save(args[1]); Console.Error.WriteLine("model written to " + args[1]);
             return 0;
         case "bench" when args.Length >= 2:
@@ -39,8 +43,8 @@ try
         case "repair" when args.Length >= 3:
             var buf = File.ReadAllBytes(args[1]);
             var mp = Opt(args, "model"); var rf = Opt(args, "ref");
-            int.TryParse(Opt(args, "beam"), out int beam); int.TryParse(Opt(args, "max-blocks"), out int maxBlocks);
-            var res = Repairer.Repair(buf, mp != null ? Model.Load(mp) : null, rf != null ? ToFloats(File.ReadAllBytes(rf)) : null, beam, maxBlocks);
+            int.TryParse(Opt(args, "beam"), out int beam); int.TryParse(Opt(args, "max-blocks"), out int maxBlocks); double.TryParse(Opt(args, "max-seconds"), out double maxSec);
+            var res = Repairer.Repair(buf, mp != null ? Model.Load(mp) : null, rf != null ? ToFloats(File.ReadAllBytes(rf)) : null, beam, maxBlocks, maxSeconds: maxSec);
             var truth = Opt(args, "truth");
             if (truth != null)
             {
