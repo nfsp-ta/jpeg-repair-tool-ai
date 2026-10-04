@@ -9,7 +9,7 @@ const string Usage = @"usage:
   jpegfix verify  a.jpg b.jpg
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
-  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N]";
+  jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N]\n  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N]";
 
 try
 {
@@ -32,6 +32,10 @@ try
             int.TryParse(Opt(args, "beam"), out int bb); double.TryParse(Opt(args, "max-seconds"), out double ms); int.TryParse(Opt(args, "limit"), out int lim);
             if (!int.TryParse(Opt(args, "threads"), out int th) || th < 1) th = Math.Max(1, Environment.ProcessorCount / 2);
             return Bench.Run(args[1], bb > 0 ? bb : 8, ms > 0 ? ms : 120, Opt(args, "scope") ?? "kind", Opt(args, "kind"), lim, th);
+        case "diag" when args.Length >= 2:
+            int.TryParse(Opt(args, "limit"), out int dl);
+            if (!int.TryParse(Opt(args, "threads"), out int dt) || dt < 1) dt = Math.Max(1, Environment.ProcessorCount / 2);
+            return Bench.RunDiag(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), dl, dt);
         case "repair" when args.Length >= 3:
             var buf = File.ReadAllBytes(args[1]);
             var mp = Opt(args, "model"); var rf = Opt(args, "ref");

@@ -14,6 +14,52 @@ static class Bench
         public bool Identical;
     }
 
+    /// <summary>Scorer diagnostic over a directory: how often does the true hypothesis beat all wrong ones, per parameter set?</summary>
+    public static int RunDiag(string dir, string scope, string? kindFilter, int limit, int threads)
+    {
+        var items = new List<(string Name, string Kind, byte[] Good)>();
+        foreach (var f in Directory.GetFiles(dir, "*.jpg").OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(f); var kind = name.Split('-')[0];
+            if (kindFilter != null && kind != kindFilter) continue;
+            var good = File.ReadAllBytes(f);
+            try { JpegParser.Parse(good); items.Add((name, kind, good)); } catch (InvalidDataException) { }
+        }
+        if (limit > 0 && items.Count > limit)
+            items = Enumerable.Range(0, limit).Select(i => items[(int)((long)i * items.Count / limit)]).ToList();
+        var loo = new LooModels(items.Select(i => (i.Good, i.Kind)).ToList(), scope);
+        var total = new Repairer.DiagStats(); var lk = new object();
+        Parallel.For(0, items.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, i =>
+        {
+            var s = Repairer.Diagnose(items[i].Good, loo.For(i));
+            lock (lk) total.Add(s);
+        });
+        string[] cn = { "needs-insertion luma", "needs-insertion chroma", "no-insertion luma", "no-insertion chroma" };
+        Console.WriteLine($"{total.Files} files; blocks followed: " + string.Join(", ", Enumerable.Range(0, 4).Select(c => cn[c] + "=" + total.Total[c])) +
+            "; true path became unreachable: " + string.Join("/", total.Unreachable) + "; true block violating hard rules: " + total.TruthInvalid);
+        double Pct(int c, int w, int l, int p) => total.Total[c] == 0 ? 0 : 100.0 * total.Wins[c, w, l, p] / total.Total[c];
+        double PctAll(int cs, int w, int l, int p) { long n = 0, k = 0; for (int c = 0; c < 4; c++) if (c / 2 == cs) { n += total.Total[c]; k += total.Wins[c, w, l, p]; } return n == 0 ? 0 : 100.0 * k / n; }
+        int bw = Array.IndexOf(Repairer.GridWm, Tunables.WM), bl = Array.IndexOf(Repairer.GridLook, Tunables.Look), bp = Array.IndexOf(Repairer.GridPen, Tunables.InsPen);
+        Console.WriteLine("\ntrue hypothesis wins (%), per block class, at the search defaults (W_M=" + Tunables.WM + " LOOK=" + Tunables.Look + " INS_PEN=" + Tunables.InsPen + "):");
+        if (bw >= 0 && bl >= 0 && bp >= 0) for (int c = 0; c < 4; c++) Console.WriteLine($"  {cn[c],-24} {Pct(c, bw, bl, bp),5:F1}");
+        double Err(int w, int l, int p) { long e = 0; for (int c = 0; c < 4; c++) e += total.Total[c] - total.Wins[c, w, l, p]; return (double)e / Math.Max(1, total.Files); }
+        Console.WriteLine("\nINS_PEN sweep (W_M=" + Repairer.GridWm[bw] + ", LOOK=" + Repairer.GridLook[bl] + "): % of blocks where the truth wins; ins = blocks needing an insertion, none = blocks without; err = lost blocks per file");
+        Console.WriteLine("  pen    ins   none    err");
+        for (int p = 0; p < Repairer.GridPen.Length; p++) Console.WriteLine($"  {Repairer.GridPen[p],3}  {PctAll(0, bw, bl, p),5:F1}  {PctAll(1, bw, bl, p),5:F1}  {Err(bw, bl, p),5:F1}");
+        Console.WriteLine("\nW_M x LOOK (INS_PEN=" + Repairer.GridPen[bp] + "): ins% / none% / err per file");
+        Console.Write("  W_M  "); foreach (var l in Repairer.GridLook) Console.Write($"  LOOK={l,-13}"); Console.WriteLine();
+        for (int w = 0; w < Repairer.GridWm.Length; w++)
+        {
+            Console.Write($"  {Repairer.GridWm[w],-4} ");
+            for (int l = 0; l < Repairer.GridLook.Length; l++) Console.Write($"  {PctAll(0, w, l, bp),3:F0}/{PctAll(1, w, l, bp),-3:F0}/{Err(w, l, bp),-5:F1}  ");
+            Console.WriteLine();
+        }
+        Console.WriteLine("\nbest (W_M, LOOK, INS_PEN) by errors per file:");
+        var best = (from w in Enumerable.Range(0, Repairer.GridWm.Length) from l in Enumerable.Range(0, Repairer.GridLook.Length) from p in Enumerable.Range(0, Repairer.GridPen.Length) orderby Err(w, l, p) select (w, l, p)).Take(5);
+        foreach (var (w, l, p) in best) Console.WriteLine($"  W_M={Repairer.GridWm[w]} LOOK={Repairer.GridLook[l]} INS_PEN={Repairer.GridPen[p]}: err/file {Err(w, l, p):F1}, ins {PctAll(0, w, l, p):F1}%, none {PctAll(1, w, l, p):F1}%");
+        return 0;
+    }
+
     public static int Run(string dir, int beam, double maxSeconds, string scope, string? kindFilter, int limit, int threads)
     {
         var files = Directory.GetFiles(dir, "*.jpg").OrderBy(f => f, StringComparer.Ordinal).ToList();
@@ -30,28 +76,13 @@ static class Bench
             items = Enumerable.Range(0, limit).Select(i => items[(int)((long)i * items.Count / limit)]).ToList();
         Console.Error.WriteLine($"{items.Count} files, beam {beam}, model scope '{scope}', {maxSeconds}s limit, {threads} threads");
 
-        // per-file statistics, plus per-group totals for leave-one-out
-        var own = new Model[items.Count]; var groupTotal = new Dictionary<string, Model>();
-        if (scope != "none")
-            for (int i = 0; i < items.Count; i++)
-            {
-                own[i] = new Model(); Repairer.Train(items[i].Good, own[i]);
-                var g = scope == "all" ? "" : items[i].Kind;
-                if (!groupTotal.TryGetValue(g, out var t)) groupTotal[g] = t = new Model();
-                t.Add(own[i]);
-            }
+        var loo = new LooModels(items.Select(i => (i.Good, i.Kind)).ToList(), scope);
 
         var rows = new Row[items.Count];
         Parallel.For(0, items.Count, new ParallelOptions { MaxDegreeOfParallelism = threads }, i =>
         {
             var (name, kind, good, J) = items[i];
-            Model? model = null;
-            if (scope != "none")
-            {
-                var gt = groupTotal[scope == "all" ? "" : kind];
-                model = new Model(); model.Add(gt); model.Add(own[i], -1);
-                if (model.Tot[0].Sum() + model.Tot[1].Sum() > 0) model.Refresh(); else model = null;
-            }
+            var model = loo.For(i);
             var bad = good.Where(b => b != 0x0D).ToArray();
             var truth = Repairer.TruthList(good);
             var row = new Row { Name = name, Kind = kind, Blocks = J.Blocks, Truth = truth.Count };

@@ -14,7 +14,7 @@ sealed class RepairResult
 }
 
 /// <summary>Beam search over blocks, hypothesising a deleted 0x0D at every byte offset a block spans.</summary>
-sealed class Repairer
+sealed partial class Repairer
 {
     const int Win = Tunables.Win;
     readonly BlockDecoder dec;
@@ -37,19 +37,26 @@ sealed class Repairer
 
     // Having just evaluated block S.N (result in dec.R), greedily decode the next L blocks (no further insertions)
     // and return the summed score. An undecodable block costs FailPen instead of killing the candidate.
-    double LookFrom(State C, int L)
+    double LookFrom(State C, int L, double[]? costs = null, double[]? mdls = null, int[]? okCount = null)
     {
-        double sum = 0; var child = C;
+        double sum = 0; var child = C; int ok = 0; bool failed = false;
         for (int j = 0; j < L && child.N < J.Blocks; j++)
         {
             FillWindow(child, chainWin);
             int lim = 8 * (bad.Length + child.K) - 8 * (child.BitPos >> 3);
-            if (!dec.EvalBlock(child, chainWin, child.BitPos & 7, lim)) { sum += Tunables.FailPen * (L - j); break; }
+            if (!dec.EvalBlock(child, chainWin, child.BitPos & 7, lim)) { sum += Tunables.FailPen * (L - j); failed = true; break; }
             sum += dec.BScore();
+            if (costs != null) { costs[j] = dec.R.Cost; mdls![j] = dec.R.Mdl; }
+            ok++;
             child = dec.MakeChild(child, child.BitPos >> 3, Array.Empty<int>());
         }
+        if (okCount != null) { okCount[0] = ok; okCount[1] = failed ? 1 : 0; }
         return sum;
     }
+
+    // decoder-equivalent state: same future decoding
+    static (int, int, int, int, int) Key(State S) =>
+        (S.BitPos - 8 * S.K, (S.BitPos >> 3) == S.RLast ? (S.BitPos & 7) + 1 : 0, S.PY, S.PCb, S.PCr);
 
     static List<State> Prune(List<State> arr, int W)
     {
@@ -57,8 +64,7 @@ sealed class Repairer
         var seen = new HashSet<(int, int, int, int, int)>(); var outList = new List<State>();
         foreach (var S in sorted)
         {
-            int inIns = (S.BitPos >> 3) == S.RLast ? (S.BitPos & 7) + 1 : 0;
-            if (!seen.Add((S.BitPos - 8 * S.K, inIns, S.PY, S.PCb, S.PCr))) continue;
+            if (!seen.Add(Key(S))) continue;
             outList.Add(S);
             if (outList.Count >= W) break;
         }
@@ -71,6 +77,47 @@ sealed class Repairer
         var bad = JpegParser.Unstuff(buf, J.ScanStart, out int rawEnd);
         var rp = new Repairer(new BlockDecoder(J, model, refData), bad);
         return rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds);
+    }
+
+    /// <summary>Decode state S under every insertion hypothesis (none, one byte at each offset, optionally two) and report each viable child via consider(S, windowStartByte, newInsertions). Block results are in dec.R during the callback.</summary>
+    void Enumerate(State S, bool allowPairs, byte[] baseW, byte[] win2, Action<State, int, int[]> consider)
+    {
+        var R = dec.R;
+        int w0 = S.BitPos >> 3, s0 = S.BitPos & 7;
+        for (int t = 0; t < Win + 8; t++)
+        {
+            int i = w0 + t;
+            if (i == S.RLast) baseW[t] = 0x0D;
+            else { int b = i - S.K; baseW[t] = b >= 0 && b < bad.Length ? bad[b] : (byte)0; }
+        }
+        int limit0 = 8 * (bad.Length + S.K) - 8 * w0;
+        double best = double.PositiveInfinity; int extent;
+        if (dec.EvalBlock(S, baseW, s0, limit0)) { best = R.Cost; extent = R.End; consider(S, w0, Array.Empty<int>()); }
+        else extent = R.Fail;
+        int dmin = Math.Max(s0 > 0 ? 1 : 0, S.RLast == w0 ? 1 : 0);
+        int dmax = Math.Min((extent + 7) / 8 + 1, Win - 16);
+        for (int d = dmin; d <= dmax; d++)
+        {
+            Array.Copy(baseW, 0, win2, 0, d); win2[d] = 0x0D; Array.Copy(baseW, d, win2, d + 1, Win + 7 - d);
+            if (!dec.EvalBlock(S, win2, s0, limit0 + 8)) continue;
+            if (R.End <= 8 * d) continue;                       // insertion not reached: same as no insertion
+            if (R.Cost + Tunables.InsPen < best) best = R.Cost + Tunables.InsPen;
+            consider(S, w0, new[] { w0 + d });
+        }
+        // two missing bytes inside one block (only when nothing else looks good)
+        if (allowPairs && best > Tunables.PairTrigger)
+        {
+            int hi = Math.Min(dmax + 6, dmin + Tunables.PairSpan);
+            for (int d1 = dmin; d1 <= hi; d1++) for (int d2 = d1 + 1; d2 <= hi + 1; d2++)
+            {
+                Array.Copy(baseW, 0, win2, 0, d1); win2[d1] = 0x0D;
+                Array.Copy(baseW, d1, win2, d1 + 1, d2 - 1 - d1); win2[d2] = 0x0D;
+                Array.Copy(baseW, d2 - 1, win2, d2 + 1, Win + 7 - d2);
+                if (!dec.EvalBlock(S, win2, s0, limit0 + 16)) continue;
+                if (R.End <= 8 * d2) continue;
+                consider(S, w0, new[] { w0 + d1, w0 + d2 });
+            }
+        }
     }
 
     RepairResult Run(int rawEnd, int beamW, int maxBlocks, bool quiet, double maxSeconds)
@@ -95,44 +142,7 @@ sealed class Repairer
             }
 
             for (int rank = 0; rank < beam.Count; rank++)
-            {
-                var S = beam[rank];
-                int w0 = S.BitPos >> 3, s0 = S.BitPos & 7;
-                for (int t = 0; t < Win + 8; t++)
-                {
-                    int i = w0 + t;
-                    if (i == S.RLast) baseW[t] = 0x0D;
-                    else { int b = i - S.K; baseW[t] = b >= 0 && b < bad.Length ? bad[b] : (byte)0; }
-                }
-                int limit0 = 8 * (bad.Length + S.K) - 8 * w0;
-                double best = double.PositiveInfinity; int extent;
-                if (dec.EvalBlock(S, baseW, s0, limit0)) { best = R.Cost; extent = R.End; Consider(S, w0, Array.Empty<int>()); }
-                else extent = R.Fail;
-                int dmin = Math.Max(s0 > 0 ? 1 : 0, S.RLast == w0 ? 1 : 0);
-                int dmax = Math.Min((extent + 7) / 8 + 1, Win - 16);
-                for (int d = dmin; d <= dmax; d++)
-                {
-                    Array.Copy(baseW, 0, win2, 0, d); win2[d] = 0x0D; Array.Copy(baseW, d, win2, d + 1, Win + 7 - d);
-                    if (!dec.EvalBlock(S, win2, s0, limit0 + 8)) continue;
-                    if (R.End <= 8 * d) continue;                       // insertion not reached: same as no insertion
-                    if (R.Cost + Tunables.InsPen < best) best = R.Cost + Tunables.InsPen;
-                    Consider(S, w0, new[] { w0 + d });
-                }
-                // two missing bytes inside one block (only when nothing else looks good)
-                if (rank < Tunables.PairRank && best > Tunables.PairTrigger)
-                {
-                    int hi = Math.Min(dmax + 6, dmin + Tunables.PairSpan);
-                    for (int d1 = dmin; d1 <= hi; d1++) for (int d2 = d1 + 1; d2 <= hi + 1; d2++)
-                    {
-                        Array.Copy(baseW, 0, win2, 0, d1); win2[d1] = 0x0D;
-                        Array.Copy(baseW, d1, win2, d1 + 1, d2 - 1 - d1); win2[d2] = 0x0D;
-                        Array.Copy(baseW, d2 - 1, win2, d2 + 1, Win + 7 - d2);
-                        if (!dec.EvalBlock(S, win2, s0, limit0 + 16)) continue;
-                        if (R.End <= 8 * d2) continue;
-                        Consider(S, w0, new[] { w0 + d1, w0 + d2 });
-                    }
-                }
-            }
+                Enumerate(beam[rank], rank < Tunables.PairRank, baseW, win2, Consider);
 
             next = Prune(next, beamW);
             if (next.Count == 0) { stuckAt = n; break; }
