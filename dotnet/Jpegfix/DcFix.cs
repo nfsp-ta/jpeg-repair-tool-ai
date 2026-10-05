@@ -13,8 +13,11 @@ static class DcFix
     public static readonly int Win = (int)Env("DC_W", 10);
     public static readonly double Thresh = Env("DC_T", 16), Spread = Env("DC_SPREAD", 24);      // dequantised DC units (1/8 grey level)
 
-    public static int Apply(CoefImage img, int[] canvas)
+    public static readonly double RefThresh = Env("DC_RT", 24), RefSpread = Env("DC_RSPREAD", 48); public static readonly int RefWin = (int)Env("DC_RW", 6);
+
+    public static int Apply(CoefImage img, int[] canvas, float[]? rf = null)
     {
+        if (Environment.GetEnvironmentVariable("DC_NOREF") != null) rf = null;
         var J = img.J; int N = J.Mcus, Mx = J.Mx, dm = img.Decoded / 6, adjustments = 0;
         var slot = new int[N]; Array.Fill(slot, -1);
         for (int p = 0; p < N; p++) if (canvas[p] >= 0 && canvas[p] < dm) slot[canvas[p]] = p;
@@ -33,6 +36,21 @@ static class DcFix
             if (A >= dm || A >= 0 && !done[A]) A = -1; if (L >= dm || L >= 0 && !done[L]) L = -1;
             for (int c = 0; c < 3; c++)
             {
+                if (rf != null)
+                {
+                    int gx = 2 * Mx, mx = p % Mx, my = p / Mx; double refDc;
+                    if (c == 0) { double rs = 0; for (int b = 0; b < 4; b++) rs += rf[(2 * my + (b >> 1)) * gx + 2 * mx + (b & 1)]; refDc = (rs / 4 - 128) * 8; }
+                    else refDc = (rf[gx * 2 * J.My + (c - 1) * Mx * J.My + my * Mx + mx] - 128) * 8;
+                    if (double.IsNaN(refDc)) continue;
+                    double curDc = c == 0 ? (cdc[i * 6] + cdc[i * 6 + 1] + cdc[i * 6 + 2] + cdc[i * 6 + 3]) / 4 : cdc[i * 6 + 3 + c];
+                    var wr = win[c]; wr.Add((i, curDc - refDc)); if (wr.Count > RefWin) wr.RemoveAt(0);
+                    if (wr.Count < RefWin) continue;
+                    var sr = wr.Select(x => x.d).OrderBy(x => x).ToArray(); double mr = (sr[RefWin / 2 - 1] + sr[RefWin / 2]) / 2;
+                    if (Math.Abs(mr) <= RefThresh || sr.Any(x => Math.Abs(x - mr) > RefSpread)) continue;
+                    off[c] += mr; adjustments++;
+                    foreach (var (m2, _) in wr) for (int bi = 0; bi < 6; bi++) if ((bi < 4 ? 0 : bi - 3) == c) cdc[m2 * 6 + bi] -= mr;
+                    wr.Clear(); continue;
+                }
                 double? da = A >= 0 ? Cur(i, c, 0) - Edge(A, c, 0) : null, dl = L >= 0 ? Cur(i, c, 1) - Edge(L, c, 1) : null;
                 double d; if (da == null && dl == null) continue; else if (da == null) d = dl!.Value; else if (dl == null) d = da.Value; else d = Math.Abs(da.Value) <= Math.Abs(dl.Value) ? da.Value : dl.Value;
                 var w = win[c]; w.Add((i, d)); if (w.Count > Win) w.RemoveAt(0);

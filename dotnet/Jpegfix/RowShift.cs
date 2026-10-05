@@ -101,12 +101,38 @@ static class RowShift
         return s;
     }
 
+    public static readonly double RefW = Env("RS_REFW", 4);      // weight of the sibling-reference pattern term
+
+    static float[] BlockMeans(Planes P)
+    {
+        var bm = new float[P.J.Mcus * 4]; int Mx = P.J.Mx, W = P.W;
+        for (int m = 0; m < P.J.Mcus; m++) for (int b = 0; b < 4; b++)
+        {
+            int x0 = m % Mx * 16 + (b & 1) * 8, y0 = m / Mx * 16 + (b >> 1) * 8; double s = 0;
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) s += P.Y[(y0 + y) * W + x0 + x];
+            bm[m * 4 + b] = (float)(s / 64);
+        }
+        return bm;
+    }
+
+    /// <summary>How much the 2x2 block-mean pattern of decoded MCU i (offset removed) differs from the reference pattern at slot p.</summary>
+    static double PatCost(float[] bm, int i, float[] rf, int p, int Mx)
+    {
+        int gx = 2 * Mx, mx = p % Mx, my = p / Mx; double cm = 0, rm = 0; var rv = new double[4];
+        for (int b = 0; b < 4; b++) { rv[b] = rf[(2 * my + (b >> 1)) * gx + 2 * mx + (b & 1)]; cm += bm[i * 4 + b]; rm += rv[b]; }
+        if (double.IsNaN(rm)) return 0;
+        cm /= 4; rm /= 4; double s = 0;
+        for (int b = 0; b < 4; b++) s += Math.Abs((bm[i * 4 + b] - cm) - (rv[b] - rm));
+        return s / 4;
+    }
+
     /// <summary>Chosen shift per decoded MCU, and the canvas (slot -> decoded MCU index, -1 empty).</summary>
-    public static int[] Detect(Planes P, out int[] canvas)
+    public static int[] Detect(Planes P, out int[] canvas, float[]? rf = null)
     {
         int Mx = P.J.Mx, My = P.J.My, N = P.J.Mcus, K = Math.Max(1, Math.Min(RowShift.K, P.J.Mx / (int)Env("RS_DIV", 8))), ns = 2 * K + 1;   // search range scales with the width: a thumbnail row has only 8 MCUs
         canvas = new int[N]; Array.Fill(canvas, -1);
         var shift = new int[N]; int carry = 0;
+        float[]? bm = rf != null ? BlockMeans(P) : null;
         var dp = new double[Mx, ns]; var from = new int[Mx, ns]; var em = new double[Mx, ns]; var raw = new double[Mx, ns];
         for (int r = 0; r < My; r++)
         {
@@ -122,6 +148,7 @@ static class RowShift
                     {
                         int a = p - Mx;
                         e = a >= 0 && canvas[a] >= 0 && P.Ok[canvas[a]] ? Seam(P, canvas[a], i) : Missing;
+                        if (rf != null) e += RefW * PatCost(bm!, i, rf, p, Mx);
                     }
                     if (e > CapE) e = CapE;
                     raw[c, si] = e;
@@ -196,23 +223,24 @@ static class RowFix
     public static readonly bool Enabled = Environment.GetEnvironmentVariable("ROWFIX") == "1";
 
     /// <summary>The whole stage on in-memory bytes: shift detection, DC re-anchoring, re-encode. Returns the input unchanged if it cannot be processed.</summary>
-    public static byte[] Apply(byte[] bytes)
+    public static byte[] Apply(byte[] bytes, float[]? rf = null)
     {
         try
         {
-            var P = Planes.Render(bytes); RowShift.Detect(P, out var canvas);
-            var img = CoefImage.Decode(bytes, out _, out int rawEnd); if (!DcFix.Off) DcFix.Apply(img, canvas);
+            var P = Planes.Render(bytes); RowShift.Detect(P, out var canvas, rf);
+            var img = CoefImage.Decode(bytes, out _, out int rawEnd); if (!DcFix.Off) DcFix.Apply(img, canvas, rf);
             return CoefImage.Assemble(bytes, img, rawEnd, canvas);
         }
         catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { return bytes; }
     }
 
     /// <summary>rowfix repaired.jpg out.jpg [original.jpg]: detect row shifts, move the MCUs in the coefficient domain and re-encode the scan.</summary>
-    public static int Run(string inPath, string outPath, string? originalPath)
+    public static int Run(string inPath, string outPath, string? originalPath, string? siblingPath = null)
     {
         var bytes = File.ReadAllBytes(inPath);
-        var P = Planes.Render(bytes); var shift = RowShift.Detect(P, out var canvas);
-        var img = CoefImage.Decode(bytes, out _, out int rawEnd); int dcAdj = DcFix.Off ? 0 : DcFix.Apply(img, canvas);
+        var P = Planes.Render(bytes); float[]? rf = siblingPath != null && Environment.GetEnvironmentVariable("REF_OFF") == null ? Repairer.BuildReference(File.ReadAllBytes(siblingPath), P.J) : null;
+        var shift = RowShift.Detect(P, out var canvas, rf);
+        var img = CoefImage.Decode(bytes, out _, out int rawEnd); int dcAdj = DcFix.Off ? 0 : DcFix.Apply(img, canvas, rf);
         var fixedBytes = CoefImage.Assemble(bytes, img, rawEnd, canvas); File.WriteAllBytes(outPath, fixedBytes);
         int moved = Enumerable.Range(0, shift.Length).Count(i => shift[i] != 0 && P.Ok[i]);
         string rep = "";

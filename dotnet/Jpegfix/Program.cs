@@ -12,7 +12,7 @@ const string Usage = @"usage:
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
   jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N] [--ref-from KIND]\n  jpegfix makeref sibling.jpg target.jpg out.bin     (reference for --ref from a clean/repaired sibling size)
-  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S] [--rowfix]";
+  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S] [--rowfix] [--sibling repaired-sibling.jpg]";
 
 try
 {
@@ -49,7 +49,7 @@ try
             return Perturb.Run(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), pl, pt);
         case "rowshift" when args.Length >= 4: return RowShift.Run(args[1], args[2], args[3]);
         case "reencode" when args.Length >= 3: File.WriteAllBytes(args[2], CoefImage.Rewrite(File.ReadAllBytes(args[1]), null)); return 0;
-        case "rowfix" when args.Length >= 3: return RowFix.Run(args[1], args[2], args.Length > 3 ? args[3] : null);
+        case "rowfix" when args.Length >= 3: return RowFix.Run(args[1], args[2], args.Length > 3 && args[3] != "-" ? args[3] : null, args.Length > 4 ? args[4] : null);
         case "makeref" when args.Length >= 4:      // makeref sibling.jpg target.jpg out.bin
             File.WriteAllBytes(args[3], FloatBytes(Repairer.BuildReference(File.ReadAllBytes(args[1]), JpegParser.Parse(File.ReadAllBytes(args[2])))));
             return 0;
@@ -70,7 +70,13 @@ try
             if (res.StuckAt >= 0) Console.Error.WriteLine($"STUCK at block {res.StuckAt} - search ran out of plausible candidates; writing partial result");
             else Console.Error.WriteLine(res.Verified ? "OK: decode ends exactly at end of file (consistent)" : "WARNING: result is not consistent with end of file");
             var repaired = Repairer.BuildOutput(buf, res);
-            if (RowFix.Enabled || args.Contains("--rowfix")) { repaired = RowFix.Apply(repaired); Console.Error.WriteLine("row-shift correction and DC re-anchoring applied"); }
+            float[]? sibRef = null;
+            if (Opt(args, "sibling") is string sibPath)
+            {
+                try { sibRef = Repairer.BuildReference(File.ReadAllBytes(sibPath), res.J); Console.Error.WriteLine("using sibling reference " + sibPath); }
+                catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { Console.Error.WriteLine("sibling reference unusable: " + ex.Message); }
+            }
+            if (RowFix.Enabled || args.Contains("--rowfix")) { repaired = RowFix.Apply(repaired, sibRef); Console.Error.WriteLine("row-shift correction and DC re-anchoring applied"); }
             File.WriteAllBytes(args[2], repaired);
             Console.Error.WriteLine($"inserted {res.List.Count} bytes");
             return res.Verified ? 0 : 1;

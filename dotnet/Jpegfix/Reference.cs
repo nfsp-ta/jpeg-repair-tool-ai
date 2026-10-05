@@ -3,7 +3,7 @@ namespace Jpegfix;
 sealed partial class Repairer
 {
     /// <summary>Decode a clean JPEG sequentially into full-resolution Y and half-resolution Cb/Cr planes (padded to whole MCUs).</summary>
-    static void DecodePlanes(byte[] clean, out JpegInfo J, out byte[] Y, out byte[] Cb, out byte[] Cr)
+    static int DecodePlanes(byte[] clean, out JpegInfo J, out byte[] Y, out byte[] Cb, out byte[] Cr)
     {
         J = JpegParser.Parse(clean);
         var data = JpegParser.Unstuff(clean, J.ScanStart, out _);
@@ -11,11 +11,12 @@ sealed partial class Repairer
         var rp = new Repairer(dec, data);
         int W = J.Mx * 16, CW = J.Mx * 8;
         Y = new byte[W * J.My * 16]; Cb = new byte[CW * J.My * 8]; Cr = new byte[CW * J.My * 8];
-        var S = dec.InitialState(); var w = new byte[Win + 8];
+        var S = dec.InitialState(); var w = new byte[Win + 8]; int doneBlocks = 0;
         for (int n = 0; n < J.Blocks; n++)
         {
             rp.FillWindow(S, w);
-            if (!dec.EvalBlock(S, w, S.BitPos & 7, 8 * data.Length - 8 * (S.BitPos >> 3))) throw new InvalidDataException($"reference file does not decode at block {n}");
+            if (S.BitPos >> 3 >= data.Length || !dec.EvalBlock(S, w, S.BitPos & 7, 8 * data.Length - 8 * (S.BitPos >> 3))) break;     // a damaged sibling: use what decoded, the rest is unknown (NaN in the reference)
+            doneBlocks = n + 1;
             int bi = n % 6, mcu = n / 6, mx = mcu % J.Mx, my = mcu / J.Mx;
             byte[] plane; int stride, x0, y0;
             if (bi < 4) { plane = Y; stride = W; x0 = mx * 16 + (bi & 1) * 8; y0 = my * 16 + (bi >> 1) * 8; }
@@ -23,6 +24,7 @@ sealed partial class Repairer
             for (int r = 0; r < 8; r++) Array.Copy(dec.R.Pix, r * 8, plane, (y0 + r) * stride + x0, 8);
             S = dec.MakeChild(S, S.BitPos >> 3, Array.Empty<int>());
         }
+        return doneBlocks / 6;
     }
 
     static double Bilinear(byte[] p, int stride, int w, int h, double fx, double fy)
@@ -40,7 +42,8 @@ sealed partial class Repairer
     /// </summary>
     public static float[] BuildReference(byte[] sibling, JpegInfo target)
     {
-        DecodePlanes(sibling, out var S, out var Y, out var Cb, out var Cr);
+        int okMcus = DecodePlanes(sibling, out var S, out var Y, out var Cb, out var Cr);
+        bool Unknown(double tx, double ty) { int mx = (int)(tx * (double)S.Width / target.Width) / 16, my = (int)(ty * (double)S.Height / target.Height) / 16; return Math.Min(my, S.My - 1) * S.Mx + Math.Min(mx, S.Mx - 1) >= okMcus; }
         int SW = S.Mx * 16, SCW = S.Mx * 8;
         int lw = S.Width, lh = S.Height, cw = (S.Width + 1) / 2, ch = (S.Height + 1) / 2;
         double sx = (double)S.Width / target.Width, sy = (double)S.Height / target.Height;
@@ -52,6 +55,7 @@ sealed partial class Repairer
             for (int r = 0; r < 8; r++) for (int c = 0; c < 8; c++)
                 sum += Bilinear(Y, SW, lw, lh, (bx * 8 + c + 0.5) * sx - 0.5, (by * 8 + r + 0.5) * sy - 0.5);
             res[by * gx + bx] = (float)(sum / 64);
+            if (Unknown(bx * 8 + 4, by * 8 + 4)) res[by * gx + bx] = float.NaN;
         }
         for (int comp = 0; comp < 2; comp++)
         {
@@ -65,6 +69,7 @@ sealed partial class Repairer
                     sum += Bilinear(plane, SCW, cw, ch, X / 2 - 0.5, Yc / 2 - 0.5);
                 }
                 res[off + by * cx + bx] = (float)(sum / 64);
+                if (Unknown(bx * 16 + 8, by * 16 + 8)) res[off + by * cx + bx] = float.NaN;
             }
         }
         return res;
