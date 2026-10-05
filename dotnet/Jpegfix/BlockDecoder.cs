@@ -38,6 +38,7 @@ sealed class BlockDecoder
     public readonly Model? Mdl;
     public readonly BlockResult R = new();
     public readonly float[]? RefY, RefCb, RefCr;
+    public double RefWeight = Tunables.RefW;          // weight of the sibling-reference term (per run, so variants can differ)
 
     readonly int[] coef = new int[64];
     int rowMask;                                   // bit v set when coefficient row v has a non-zero value (the inverse DCT skips the zero rows)
@@ -280,7 +281,7 @@ sealed class BlockDecoder
         if (RefY != null)
         {
             float rv = bi < 4 ? RefY[(my * 2 + (bi >> 1)) * J.Mx * 2 + mx * 2 + (bi & 1)] : (bi == 4 ? RefCb! : RefCr!)[my * J.Mx + mx];
-            if (!float.IsNaN(rv)) cost += Tunables.RefW * Math.Min(60, Math.Abs(dc / 8.0 + 128 - rv));      // NaN = the sibling is unknown here
+            if (!float.IsNaN(rv)) cost += RefWeight * Math.Min(60, Math.Abs(dc / 8.0 + 128 - rv));      // NaN = the sibling is unknown here
         }
         R.Cost = cost > Tunables.Cap ? Tunables.Cap : cost;
         R.End = bp; R.Pred = pred; R.Dc = dc; R.DcBits = dcBits;

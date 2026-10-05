@@ -17,7 +17,10 @@ static class Bench
 
     // Oracle reference from the clean sibling size. REF_OFF=1 keeps the sibling-only file selection but disables the reference (for A/B runs on identical files).
     // REF_REPAIRED=1: the reference comes from the sibling repaired by stage 1 (as in a real run), not from the clean sibling.
-    static byte[]? RepairedOutput(List<Item> all, int j, LooModels loo, double maxSec)
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Lazy<byte[]?>> memo = new();
+    static byte[]? RepairedOutput(List<Item> all, int j, LooModels loo, double maxSec) => memo.GetOrAdd(j, _ => new Lazy<byte[]?>(() => RepairedOutputCore(all, j, loo, maxSec))).Value;
+
+    static byte[]? RepairedOutputCore(List<Item> all, int j, LooModels loo, double maxSec)
     {
         try
         {
@@ -33,7 +36,13 @@ static class Bench
 
     static float[]? MakeRepairedRef(List<Item> all, int i, string refFrom, LooModels loo, double maxSec)
     {
-        try { var o = RepairedOutput(all, Corpus.Sibling(all, i, refFrom), loo, maxSec); return o == null ? null : Repairer.BuildReference(o, all[i].J); }
+        try
+        {
+            var o = RepairedOutput(all, Corpus.Sibling(all, i, refFrom), loo, maxSec); if (o == null) return null;
+            int ti = refFrom == "preview" && Environment.GetEnvironmentVariable("REF_COMBINE") != "0" ? Corpus.Sibling(all, i, "thumb") : -1;     // originals: also use the repaired thumbnail to catch damage in the repaired medium
+            var anchor = ti >= 0 ? RepairedOutput(all, ti, loo, maxSec) : null;
+            return anchor != null ? Repairer.BuildCombinedReference(o, anchor, all[i].J, out _) : Repairer.BuildReference(o, all[i].J);
+        }
         catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { return null; }
     }
 

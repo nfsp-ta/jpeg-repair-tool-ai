@@ -83,11 +83,12 @@ sealed partial class Repairer
         return outList;
     }
 
-    public static RepairResult Repair(byte[] buf, Model? model, float[]? refData, int beamW, int maxBlocks, bool quiet = false, double maxSeconds = 0, List<(int, int, int, int, int)>? truthKeys = null)
+    public static RepairResult Repair(byte[] buf, Model? model, float[]? refData, int beamW, int maxBlocks, bool quiet = false, double maxSeconds = 0, List<(int, int, int, int, int)>? truthKeys = null, double refWeight = -1)
     {
         var J = JpegParser.Parse(buf);
         var bad = JpegParser.Unstuff(buf, J.ScanStart, out int rawEnd);
-        var rp = new Repairer(new BlockDecoder(J, model, refData), bad);
+        var bdec = new BlockDecoder(J, model, refData); if (refWeight >= 0) bdec.RefWeight = refWeight;
+        var rp = new Repairer(bdec, bad);
         var res = rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds, truthKeys);
         if (Tunables.Refine && maxBlocks <= 0) { var sw = System.Diagnostics.Stopwatch.StartNew(); var r2 = Refine(res, model, refData); r2.Seconds = res.Seconds + sw.Elapsed.TotalSeconds; r2.LostAt = res.LostAt; r2.TimedOut = res.TimedOut; res = r2; }
         return res;

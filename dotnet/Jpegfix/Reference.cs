@@ -116,3 +116,77 @@ sealed partial class Repairer
         }
     }
 }
+
+sealed partial class Repairer
+{
+    static double EnvD(string n, double d) => double.TryParse(Environment.GetEnvironmentVariable(n), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : d;
+    public static readonly int RefLpRadius = (int)EnvD("REF_LP", 1);
+    public static readonly double RefT1 = EnvD("REF_T1", 8), RefT2 = EnvD("REF_T2", 20), RefCT1 = EnvD("REF_CT1", 3), RefCT2 = EnvD("REF_CT2", 9);
+
+    /// <summary>Box mean of a plane over (2r+1)^2 blocks, ignoring NaN (NaN when nothing valid).</summary>
+    static float[] LowPass(float[] src, int off, int w, int h, int r)
+    {
+        var o = new float[w * h];
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+        {
+            double s = 0; int n = 0;
+            for (int yy = Math.Max(0, y - r); yy <= Math.Min(h - 1, y + r); yy++) for (int xx = Math.Max(0, x - r); xx <= Math.Min(w - 1, x + r); xx++)
+            { float v = src[off + yy * w + xx]; if (!float.IsNaN(v)) { s += v; n++; } }
+            o[y * w + x] = n == 0 ? float.NaN : (float)(s / n);
+        }
+        return o;
+    }
+
+    /// <summary>
+    /// Reference from two repaired smaller siblings: <paramref name="nearest"/> (the next smaller size, sharp but possibly damaged in places) and
+    /// <paramref name="anchor"/> (the smallest size, blurry but usually the cleanest). Where the two agree at a coarse scale the nearest one is
+    /// used (its detail, with its low-frequency level nudged to the anchor's); where they disagree the nearest sibling is damaged and the anchor is used.
+    /// </summary>
+    public static float[] BuildCombinedReference(byte[] nearest, byte[] anchor, JpegInfo target, out double anchorOnlyFraction)
+    {
+        float[]? rM = null; float[]? rT = null;
+        try { rM = BuildReference(nearest, target); } catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { }
+        try { rT = BuildReference(anchor, target); } catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { }
+        anchorOnlyFraction = 0;
+        if (rM == null && rT == null) throw new InvalidDataException("no usable sibling");
+        if (rM == null) { anchorOnlyFraction = 1; return rT!; }
+        if (rT == null) return rM;
+        int gx = target.Mx * 2, gy = target.My * 2, cx = target.Mx, cy = target.My;
+        var res = new float[rM.Length]; long used = 0, total = 0;
+        for (int plane = 0; plane < 3; plane++)
+        {
+            int off = plane == 0 ? 0 : gx * gy + (plane - 1) * cx * cy, w = plane == 0 ? gx : cx, h = plane == 0 ? gy : cy;
+            double t1 = plane == 0 ? RefT1 : RefCT1, t2 = plane == 0 ? RefT2 : RefCT2;
+            var lm = LowPass(rM, off, w, h, RefLpRadius); var lt = LowPass(rT, off, w, h, RefLpRadius);
+            for (int i = 0; i < w * h; i++)
+            {
+                float m = rM[off + i], t = rT[off + i]; total++;
+                if (float.IsNaN(m)) { res[off + i] = t; if (!float.IsNaN(t)) used++; continue; }
+                if (float.IsNaN(t) || float.IsNaN(lm[i]) || float.IsNaN(lt[i])) { res[off + i] = m; continue; }
+                double d = Math.Abs(lm[i] - lt[i]), wt = Math.Clamp((d - t1) / (t2 - t1), 0, 1);
+                if (wt >= 0.5) used++;
+                res[off + i] = (float)((1 - wt) * (m + (lt[i] - lm[i])) + wt * t);
+            }
+        }
+        anchorOnlyFraction = total == 0 ? 0 : (double)used / total;
+        return res;
+    }
+
+    /// <summary>Mean absolute error of a reference against the true block means of the clean target image (luma and chroma), over the blocks the reference knows.</summary>
+    public static (double luma, double chroma, double unknown) ReferenceError(float[] rf, byte[] cleanTarget)
+    {
+        var P = Planes.Render(cleanTarget); int Mx = P.J.Mx, gx = 2 * Mx, gy = 2 * P.J.My, cx = Mx, cy = P.J.My;
+        double sl = 0, sc = 0; long nl = 0, nc = 0, un = 0, all = 0;
+        for (int by = 0; by < gy; by++) for (int bx = 0; bx < gx; bx++)
+        {
+            double s = 0; for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) s += P.Y[(by * 8 + y) * P.W + bx * 8 + x];
+            float v = rf[by * gx + bx]; all++; if (float.IsNaN(v)) { un++; continue; } sl += Math.Abs(s / 64 - v); nl++;
+        }
+        for (int comp = 0; comp < 2; comp++) for (int by = 0; by < cy; by++) for (int bx = 0; bx < cx; bx++)
+        {
+            var pl = comp == 0 ? P.Cb : P.Cr; double s = 0; for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) s += pl[(by * 8 + y) * P.CW + bx * 8 + x];
+            float v = rf[gx * gy + comp * cx * cy + by * cx + bx]; all++; if (float.IsNaN(v)) { un++; continue; } sc += Math.Abs(s / 64 - v); nc++;
+        }
+        return (nl == 0 ? 0 : sl / nl, nc == 0 ? 0 : sc / nc, (double)un / Math.Max(1, all));
+    }
+}

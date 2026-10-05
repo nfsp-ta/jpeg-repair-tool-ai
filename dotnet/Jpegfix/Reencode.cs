@@ -5,7 +5,8 @@ sealed class CoefImage
 {
     public readonly JpegInfo J;
     public readonly short[][] Blk;       // per block: 64 values, zigzag order, [0] = absolute (not differential) DC
-    public int Decoded;                  // number of blocks that decoded; the rest are empty
+    public int Decoded;
+    public int EndBit, DataBits;          // bit position where the last decoded block ended, and the size of the entropy data in bits                  // number of blocks that decoded; the rest are empty
     public CoefImage(JpegInfo j) { J = j; Blk = new short[j.Blocks][]; }
 
     static int Peek16(byte[] w, int bp) { int i = bp >> 3; return (((w[i] << 16) | (w[i + 1] << 8) | w[i + 2]) >> (8 - (bp & 7))) & 0xFFFF; }
@@ -39,7 +40,7 @@ sealed class CoefImage
                 blk[k++] = (short)v;
             }
             if (!ok || p > limit) break;
-            pred[ci] = dc; img.Blk[n] = blk; bp = p; img.Decoded = n + 1;
+            pred[ci] = dc; img.Blk[n] = blk; bp = p; img.Decoded = n + 1; img.EndBit = p; img.DataBits = limit;
         }
         return img;
     }

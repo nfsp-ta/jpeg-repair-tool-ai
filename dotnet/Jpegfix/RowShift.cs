@@ -256,3 +256,24 @@ static class RowFix
     }
 }
 
+
+/// <summary>Quality of a repaired image that needs no original: how smoothly its 8x8 block seams (luma, both directions) continue.</summary>
+static class Quality
+{
+    /// <summary>Mean gradient-aware seam cost over all internal block boundaries of decoded MCUs (lower is better), and the fraction of blocks decoded.</summary>
+    public static (double seam, double decoded) Measure(Planes P)
+    {
+        int W = P.W, H = P.H, Mx = P.J.Mx; var Y = P.Y; double sum = 0; long n = 0; int ok = 0;
+        for (int m = 0; m < P.J.Mcus; m++) if (P.Ok[m]) ok++;
+        for (int by = 0; by < H / 8; by++) for (int bx = 0; bx < W / 8; bx++)
+        {
+            if (!P.Ok[(by / 2) * Mx + bx / 2]) continue;
+            int x0 = bx * 8, y0 = by * 8;
+            if (bx > 0 && P.Ok[(by / 2) * Mx + (bx - 1) / 2])
+                for (int r = 0; r < 8; r++) { double p0 = Y[(y0 + r) * W + x0], p1 = Y[(y0 + r) * W + x0 + 1], t0 = Y[(y0 + r) * W + x0 - 1], t1 = Y[(y0 + r) * W + x0 - 2]; sum += Math.Abs((p0 - t0) - ((p1 - p0) + (t0 - t1)) / 2); n++; }
+            if (by > 0 && P.Ok[((by - 1) / 2) * Mx + bx / 2])
+                for (int c = 0; c < 8; c++) { double p0 = Y[y0 * W + x0 + c], p1 = Y[(y0 + 1) * W + x0 + c], t0 = Y[(y0 - 1) * W + x0 + c], t1 = Y[(y0 - 2) * W + x0 + c]; sum += Math.Abs((p0 - t0) - ((p1 - p0) + (t0 - t1)) / 2); n++; }
+        }
+        return (n == 0 ? 99 : sum / n, (double)ok / P.J.Mcus);
+    }
+}
