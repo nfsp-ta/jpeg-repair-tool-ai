@@ -220,7 +220,7 @@ static class RowShift
 
 static class RowFix
 {
-    public static readonly bool Enabled = Environment.GetEnvironmentVariable("ROWFIX") == "1";
+    public static readonly bool Enabled = Environment.GetEnvironmentVariable("ROWFIX") != "0";      // on by default; ROWFIX=0 turns it off
 
     /// <summary>The whole stage on in-memory bytes: shift detection, DC re-anchoring, re-encode. Returns the input unchanged if it cannot be processed.</summary>
     public static byte[] Apply(byte[] bytes, float[]? rf = null)

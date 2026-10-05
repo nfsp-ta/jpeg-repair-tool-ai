@@ -23,29 +23,29 @@ sealed partial class Repairer
     readonly byte[] bad;
     readonly byte[] chainWin = new byte[Win + 8];
 
-    Repairer(BlockDecoder d, byte[] badStream) { dec = d; J = d.J; bad = badStream; }
+    Repairer(BlockDecoder d, byte[] badStream) { dec = d; J = d.J; bad = badStream; d.Filler = FillWindow; }
 
     void FillWindow(State S, byte[] outW)
     {
-        int w0 = S.BitPos >> 3;
-        for (int t = 0; t < Win + 8; t++)
-        {
-            int i = w0 + t;
-            if (i == S.RLast) outW[t] = 0x0D;
-            else { int b = i - S.K; outW[t] = b >= 0 && b < bad.Length ? bad[b] : (byte)0; }
-        }
+        int w0 = S.BitPos >> 3, n = Win + 8, b0 = w0 - S.K;
+        int lo = Math.Max(0, -b0), hi = Math.Min(n, bad.Length - b0);          // window positions that map into the damaged stream
+        Array.Clear(outW, 0, n);
+        if (hi > lo) Array.Copy(bad, b0 + lo, outW, lo, hi - lo);
+        int t = S.RLast - w0; if (t >= 0 && t < n) outW[t] = 0x0D;           // the byte inserted last
     }
 
     // Having just evaluated block S.N (result in dec.R), greedily decode the next L blocks (no further insertions)
     // and return the summed score. An undecodable block costs FailPen instead of killing the candidate.
-    double LookFrom(State C, int L, double[]? costs = null, double[]? mdls = null, int[]? okCount = null)
+    double LookFrom(State C, int L, double[]? costs = null, double[]? mdls = null, int[]? okCount = null) { long t0 = Prof.Start(); var r = LookFromCore(C, L, costs, mdls, okCount); Prof.Stop(3, t0); return r; }
+
+    double LookFromCore(State C, int L, double[]? costs, double[]? mdls, int[]? okCount)
     {
         double sum = 0; var child = C; int ok = 0; bool failed = false;
         for (int j = 0; j < L && child.N < J.Blocks; j++)
         {
-            FillWindow(child, chainWin);
+            if (Prof.On) Prof.Seen((child.N, child.BitPos - 8 * child.K, (child.BitPos >> 3) == child.RLast ? (child.BitPos & 7) + 1 : 0, child.PY, child.PCb, child.PCr));
             int lim = 8 * (bad.Length + child.K) - 8 * (child.BitPos >> 3);
-            if (!dec.EvalBlock(child, chainWin, child.BitPos & 7, lim)) { sum += Tunables.FailPen * (L - j); failed = true; break; }
+            if (!dec.EvalBlock(child, null, child.BitPos & 7, lim, true)) { sum += Tunables.FailPen * (L - j); failed = true; break; }
             sum += dec.BScore();
             if (costs != null) { costs[j] = dec.R.Cost; mdls![j] = dec.R.Mdl; }
             ok++;
@@ -62,7 +62,9 @@ sealed partial class Repairer
     // selection score across parents
     static double Sel(State S) => Tunables.LookW == 1 ? S.Rank : S.Cost + Tunables.LookW * (S.Rank - S.Cost);
 
-    static List<State> Prune(List<State> arr, int W)
+    static List<State> Prune(List<State> arr, int W) { long t0 = Prof.Start(); var r = PruneCore(arr, W); Prof.Stop(4, t0); return r; }
+
+    static List<State> PruneCore(List<State> arr, int W)
     {
         IEnumerable<State> cand = arr.OrderBy(s => s.Rank);            // stable, like JS Array.sort
         if (Tunables.PerParent < arr.Count)
@@ -92,19 +94,16 @@ sealed partial class Repairer
     }
 
     /// <summary>Decode state S under every insertion hypothesis (none, one byte at each offset, optionally two) and report each viable child via consider(S, windowStartByte, newInsertions). Block results are in dec.R during the callback.</summary>
-    void Enumerate(State S, bool allowPairs, byte[] baseW, byte[] win2, Action<State, int, int[]> consider)
+    void Enumerate(State S, bool allowPairs, byte[] baseW, byte[] win2, Action<State, int, int[]> consider) { long t0 = Prof.Start(); EnumerateCore(S, allowPairs, baseW, win2, consider); Prof.Stop(5, t0); }
+
+    void EnumerateCore(State S, bool allowPairs, byte[] baseW, byte[] win2, Action<State, int, int[]> consider)
     {
         var R = dec.R;
         int w0 = S.BitPos >> 3, s0 = S.BitPos & 7;
-        for (int t = 0; t < Win + 8; t++)
-        {
-            int i = w0 + t;
-            if (i == S.RLast) baseW[t] = 0x0D;
-            else { int b = i - S.K; baseW[t] = b >= 0 && b < bad.Length ? bad[b] : (byte)0; }
-        }
+        FillWindow(S, baseW);
         int limit0 = 8 * (bad.Length + S.K) - 8 * w0;
         double best = double.PositiveInfinity; int extent;
-        if (dec.EvalBlock(S, baseW, s0, limit0)) { best = R.Cost; extent = R.End; consider(S, w0, Array.Empty<int>()); }
+        if (dec.EvalBlock(S, baseW, s0, limit0, true)) { best = R.Cost; extent = R.End; consider(S, w0, Array.Empty<int>()); }
         else extent = R.Fail;
         int dmin = Math.Max(s0 > 0 ? 1 : 0, S.RLast == w0 ? 1 : 0);
         int dmax = Math.Min((extent + 7) / 8 + 1, Win - 16);
@@ -150,6 +149,7 @@ sealed partial class Repairer
             var dbgAll = lostDebug && lostAt < 0 ? new List<(State C, int Ins)>() : null;
             void Consider(State S, int w0, int[] newIns)
             {
+                long tc = Prof.Start();
                 var C = dec.MakeChild(S, w0, newIns);
                 C.Rank = C.Cost + (Tunables.Look > 0 ? LookFrom(C, Tunables.Look) : 0);
                 C.Origin = originOf.TryGetValue(S, out int oi) ? oi : 0;
@@ -157,6 +157,7 @@ sealed partial class Repairer
                 if (Sel(C) >= cutoff) return;
                 next.Add(C);
                 if (next.Count >= (Tunables.BeamDelta > 0 ? Tunables.BeamMax * 2 : bw * 4)) { next = Prune(next, bw); cutoff = Sel(next[^1]); }
+                Prof.Stop(6, tc);
             }
 
             for (int rank = 0; rank < beam.Count; rank++)
@@ -191,6 +192,7 @@ sealed partial class Repairer
         bool verified = winner != null && stuckAt < 0 && total == J.Blocks;
         winner ??= beam[0];
         var list = new List<int>(); for (var nd = winner.Ins; nd != null; nd = nd.Prev) list.Add(nd.Bad); list.Reverse();
+        Prof.Report(sw.Elapsed.TotalSeconds);
         return new RepairResult { J = J, Bad = bad, RawEnd = rawEnd, List = list, Verified = verified, StuckAt = stuckAt, TimedOut = timedOut, LostAt = lostAt, Seconds = sw.Elapsed.TotalSeconds, Total = total };
     }
 

@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace Jpegfix;
 
 sealed class InsNode
@@ -38,11 +40,17 @@ sealed class BlockDecoder
     public readonly float[]? RefY, RefCb, RefCr;
 
     readonly int[] coef = new int[64];
+    int rowMask;                                   // bit v set when coefficient row v has a non-zero value (the inverse DCT skips the zero rows)
+    readonly int[] nzCols = new int[8], nzRows = new int[8];
     readonly byte[] sz = new byte[64];
     readonly double[] tmp = new double[64];
     readonly double[] T0 = new double[8], T1 = new double[8], L0 = new double[8], L1 = new double[8];
     double over;
     static readonly double[] M = BuildM();
+    static readonly double[] Mt = BuildMt();          // transposed: Mt[u * 8 + x] = M[x * 8 + u], contiguous in x for the vector loads
+    readonly double[] px = new double[64];
+
+    static double[] BuildMt() { var t = new double[64]; for (int x = 0; x < 8; x++) for (int u = 0; u < 8; u++) t[u * 8 + x] = M[x * 8 + u]; return t; }
 
     static double[] BuildM()
     {
@@ -64,18 +72,55 @@ sealed class BlockDecoder
 
     public byte[] Sizes => sz;
 
-    void Idct()
+    void Idct() { long t0 = Prof.Start(); IdctCore(); Prof.Stop(1, t0); }
+
+    void IdctCore()
     {
-        for (int v = 0; v < 8; v++) for (int x = 0; x < 8; x++)
+        // Same arithmetic in the same order as the dense scalar version (multiply then add per term, zero terms skipped, no fused multiply-add),
+        // so the results are bit-identical; the vector path computes 4 output columns at once.
+        int nr = 0;
+        if (Vector256.IsHardwareAccelerated)
         {
-            double s = 0; for (int u = 0; u < 8; u++) s += coef[v * 8 + u] * M[x * 8 + u]; tmp[v * 8 + x] = s;
+            for (int v = 0; v < 8; v++)
+            {
+                if ((rowMask >> v & 1) == 0) continue;
+                nzRows[nr++] = v; int b = v * 8, nc = 0;
+                for (int u = 0; u < 8; u++) if (coef[b + u] != 0) nzCols[nc++] = u;
+                for (int h = 0; h < 8; h += 4)
+                {
+                    var s = Vector256<double>.Zero;
+                    for (int j = 0; j < nc; j++) { int u = nzCols[j]; s = s + Vector256.Create((double)coef[b + u]) * Vector256.LoadUnsafe(ref Mt[u * 8 + h]); }
+                    s.StoreUnsafe(ref tmp[b + h]);
+                }
+            }
+            for (int y = 0; y < 8; y++) for (int h = 0; h < 8; h += 4)
+            {
+                var s = Vector256.Create(128.0);
+                for (int j = 0; j < nr; j++) { int v = nzRows[j]; s = s + Vector256.Create(Mt[v * 8 + y]) * Vector256.LoadUnsafe(ref tmp[v * 8 + h]); }
+                s.StoreUnsafe(ref px[y * 8 + h]);
+            }
+        }
+        else
+        {
+            for (int v = 0; v < 8; v++)
+            {
+                if ((rowMask >> v & 1) == 0) continue;
+                nzRows[nr++] = v; int b = v * 8, nc = 0;
+                for (int u = 0; u < 8; u++) if (coef[b + u] != 0) nzCols[nc++] = u;
+                for (int x = 0; x < 8; x++) { double s = 0; for (int j = 0; j < nc; j++) { int u = nzCols[j]; s += coef[b + u] * M[x * 8 + u]; } tmp[b + x] = s; }
+            }
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+            {
+                double s = 128; for (int j = 0; j < nr; j++) { int v = nzRows[j]; s += M[y * 8 + v] * tmp[v * 8 + x]; }
+                px[y * 8 + x] = s;
+            }
         }
         double ov = 0;
-        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+        for (int i = 0; i < 64; i++)
         {
-            double s = 128; for (int v = 0; v < 8; v++) s += M[y * 8 + v] * tmp[v * 8 + x];
+            double s = px[i];
             if (s < -20) ov += -20 - s; else if (s > 275) ov += s - 275;
-            R.Pix[y * 8 + x] = (byte)(s < 0 ? 0 : s > 255 ? 255 : (int)(s + 0.5));
+            R.Pix[i] = (byte)(s < 0 ? 0 : s > 255 ? 255 : (int)(s + 0.5));
         }
         over = ov / 64;
     }
@@ -89,7 +134,45 @@ sealed class BlockDecoder
     bool Fail(int bp) { R.Fail = bp; return R.Ok = false; }
 
     /// <summary>Decode block S.N from window w starting at bit s0. Fills R. limitRel = bits available in the window.</summary>
-    public bool EvalBlock(State S, byte[] w, int s0, int limitRel)
+    /// <param name="pure">The window is exactly the damaged stream at the state's position with no hypothetical insertion in it, so the decode (bits to pixels) depends only on the decoder-equivalent state and can be reused.</param>
+    public bool EvalBlock(State S, byte[]? w, int s0, int limitRel, bool pure = false)
+    {
+        long t0 = Prof.Start();
+        bool ok = (pure ? DecodeCached(S, w, s0, limitRel) : DecodeCore(S, w!, s0, limitRel)) && Score(S, s0);
+        Prof.Stop(0, t0); return ok;
+    }
+
+    // ---- decode stage: bits -> coefficients -> pixels (+ statistics term). Pure function of the bits and the DC predictor.
+    int dPred, dDc, dDcBits, dBp; double dMdl;
+
+    sealed class DecEntry { public bool Fail; public int Consumed, Pred, Dc, DcBits; public double Mdl, Over; public readonly byte[] Pix = new byte[64]; }
+    readonly Dictionary<(int, int, int), DecEntry>[] cache = { new(), new(), new(), new() };
+    readonly int[] cacheN = { -1, -1, -1, -1 };
+    public static long CacheHits, CacheMisses;
+    public Action<State, byte[]>? Filler;          // builds the standard window for a state; used lazily on a cache miss when the caller passes no window
+    readonly byte[] pureWin = new byte[Tunables.Win + 8];
+
+    bool DecodeCached(State S, byte[]? w, int s0, int limitRel)
+    {
+        int ci = S.N % 6 < 4 ? 0 : S.N % 6 - 3, pred0 = ci == 0 ? S.PY : ci == 1 ? S.PCb : S.PCr;
+        var key = (S.BitPos - 8 * S.K, (S.BitPos >> 3) == S.RLast ? (S.BitPos & 7) + 1 : 0, pred0);
+        int slot = S.N & 3; if (cacheN[slot] != S.N) { cache[slot].Clear(); cacheN[slot] = S.N; }
+        if (cache[slot].TryGetValue(key, out var e))
+        {
+            if (Prof.On) CacheHits++;
+            if (e.Fail) { R.Fail = s0 + e.Consumed; R.Ok = false; return false; }
+            Array.Copy(e.Pix, R.Pix, 64); over = e.Over; dPred = e.Pred; dDc = e.Dc; dDcBits = e.DcBits; dBp = s0 + e.Consumed; dMdl = e.Mdl; return true;
+        }
+        if (Prof.On) CacheMisses++;
+        if (w == null) { Filler!(S, pureWin); w = pureWin; }
+        bool ok = DecodeCore(S, w, s0, limitRel);
+        var ne = new DecEntry();
+        if (!ok) { ne.Fail = true; ne.Consumed = R.Fail - s0; }
+        else { ne.Consumed = dBp - s0; ne.Pred = dPred; ne.Dc = dDc; ne.DcBits = dDcBits; ne.Mdl = dMdl; ne.Over = over; Array.Copy(R.Pix, ne.Pix, 64); }
+        cache[slot][key] = ne; return ok;
+    }
+
+    bool DecodeCore(State S, byte[] w, int s0, int limitRel)
     {
         int bi = S.N % 6, ci = bi < 4 ? 0 : bi - 3;
         var dcLut = J.DcLut[ci]; var acLut = J.AcLut[ci]; var q = J.Qz[ci];
@@ -105,7 +188,7 @@ sealed class BlockDecoder
         int dcBits = bp - s0;
         int dc = pred * q[0];
         if (dc > 1100 || dc < -1100) return Fail(bp);
-        coef[0] = dc;
+        coef[0] = dc; rowMask = 1;
         int k = 1;
         while (k < 64)
         {
@@ -125,16 +208,24 @@ sealed class BlockDecoder
             if (v < (1 << (s - 1))) v -= (1 << s) - 1;
             int dq = v * q[k];
             if (dq > 1500 || dq < -1500) return Fail(bp);
-            coef[JpegParser.ZZ[k]] = dq; sz[k] = (byte)s; k++;
+            coef[JpegParser.ZZ[k]] = dq; rowMask |= 1 << (JpegParser.ZZ[k] >> 3); sz[k] = (byte)s; k++;
         }
         if (bp > limitRel || bp > Tunables.Win * 8) return Fail(bp);
+        Idct();                                   // pixels are needed by the cost, and for the edges kept in the state
+        dPred = pred; dDc = dc; dDcBits = dcBits; dBp = bp;
+        dMdl = Mdl != null ? Mdl.Bits(ci, sz) - (bp - s0 - dcBits) : 0;
+        return true;
+    }
 
-        // ---- cost: how well does this block continue its neighbours?
+    // ---- scoring stage: how well does the decoded block continue its neighbours? (depends on the state, so never cached)
+    bool Score(State S, int s0)
+    {
+        int bi = S.N % 6, ci = bi < 4 ? 0 : bi - 3;
+        int pred = dPred, dc = dDc, dcBits = dDcBits, bp = dBp;
         int mcu = S.N / 6, mx = mcu % J.Mx, my = mcu / J.Mx;
         double sum = 0, cost; int cnt = 0;
         if (bi < 4)
         {
-            Idct();
             var pix = R.Pix; var mp = S.McuPix; var eb = S.EdgeBottom; var er = S.EdgeRight; int W16 = J.Mx * 16;
             bool hasT = false, hasL = false;
             if (bi == 0)
@@ -175,7 +266,6 @@ sealed class BlockDecoder
             if (mx > 0) { sum += Math.Abs(dc - left); cnt++; }
             if (my > 0) { sum += Math.Abs(dc - above[mx]); cnt++; }
             double dcCost = cnt != 0 ? sum / cnt / 8 : 0;
-            Idct();                                   // pixels are needed to keep chroma edges in the state
             if (Tunables.Chroma == "dc") cost = dcCost;
             else
             {
@@ -194,7 +284,7 @@ sealed class BlockDecoder
         }
         R.Cost = cost > Tunables.Cap ? Tunables.Cap : cost;
         R.End = bp; R.Pred = pred; R.Dc = dc; R.DcBits = dcBits;
-        R.Mdl = Mdl != null ? Mdl.Bits(ci, sz) - (bp - s0 - dcBits) : 0;
+        R.Mdl = dMdl;
         return R.Ok = true;
     }
 
@@ -202,7 +292,9 @@ sealed class BlockDecoder
     public double BScore() => R.Cost + (Mdl != null ? Tunables.WM * R.Mdl : 0);
 
     /// <summary>Child state after accepting the block last evaluated (result in R) with the given new insertions.</summary>
-    public State MakeChild(State S, int w0, int[] newIns)
+    public State MakeChild(State S, int w0, int[] newIns) { long t0 = Prof.Start(); var c = MakeChildCore(S, w0, newIns); Prof.Stop(2, t0); return c; }
+
+    State MakeChildCore(State S, int w0, int[] newIns)
     {
         int bi = S.N % 6, mcu = S.N / 6, mx = mcu % J.Mx;
         var C = S.Clone();

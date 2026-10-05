@@ -12,6 +12,8 @@ const string Usage = @"usage:
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
   jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N] [--ref-from KIND]\n  jpegfix makeref sibling.jpg target.jpg out.bin     (reference for --ref from a clean/repaired sibling size)
+  jpegfix cascade --out DIR [--models DIR] [--max-seconds S] [--beam N] [--id NAME] [--no-resume] damaged1.jpg [damaged2.jpg ...]   (the default pipeline: sizes of ONE picture, smallest first, each repaired size is the reference for the next)
+  jpegfix cascade-dir IN_DIR --out DIR [--models DIR] [--max-seconds S] [--threads N] [--no-resume]   (files thumb-ID.jpg, preview-ID.jpg, orig-ID.jpg grouped by ID)
   jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S] [--rowfix] [--sibling repaired-sibling.jpg]";
 
 try
@@ -50,6 +52,20 @@ try
         case "rowshift" when args.Length >= 4: return RowShift.Run(args[1], args[2], args[3]);
         case "reencode" when args.Length >= 3: File.WriteAllBytes(args[2], CoefImage.Rewrite(File.ReadAllBytes(args[1]), null)); return 0;
         case "rowfix" when args.Length >= 3: return RowFix.Run(args[1], args[2], args.Length > 3 && args[3] != "-" ? args[3] : null, args.Length > 4 ? args[4] : null);
+        case "cascade" when args.Length >= 2:
+        {
+            var co = Cascade.Parse(args, n => Opt(args, n));
+            if (co.OutDir == "") { Console.Error.WriteLine("cascade needs --out DIR"); return 2; }
+            var cfiles = new List<string>(); for (int i = 1; i < args.Length; i++) { if (args[i].StartsWith("--")) { if (args[i] != "--no-resume") i++; } else cfiles.Add(args[i]); }
+            return Cascade.RunFiles(co, Opt(args, "id") ?? "picture", cfiles);
+        }
+        case "cascade-dir" when args.Length >= 2:
+        {
+            var co = Cascade.Parse(args, n => Opt(args, n));
+            if (co.OutDir == "") { Console.Error.WriteLine("cascade-dir needs --out DIR"); return 2; }
+            if (!int.TryParse(Opt(args, "threads"), out int cth) || cth < 1) cth = Math.Max(1, Environment.ProcessorCount / 2);
+            return Cascade.RunDir(args[1], co, cth);
+        }
         case "makeref" when args.Length >= 4:      // makeref sibling.jpg target.jpg out.bin
             File.WriteAllBytes(args[3], FloatBytes(Repairer.BuildReference(File.ReadAllBytes(args[1]), JpegParser.Parse(File.ReadAllBytes(args[2])))));
             return 0;
