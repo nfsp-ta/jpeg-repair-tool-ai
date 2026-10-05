@@ -3,8 +3,8 @@
 # repair it with a leave-one-out statistics model, and write a picture: one row per size (original size on top, thumbnail at the bottom), columns
 # damaged | repaired | original.
 #   tools/preview.sh <id> [real|synthetic] [max-seconds=60]      -> testdata/out/<id>-<real|synthetic>.png
-# ROWFIX=1 adds the post-processing cascade: after the (parallel) stage-1 repairs, preview is corrected against the repaired thumbnail and
-# orig against the corrected preview (row-shift correction + DC re-anchoring against the smaller sibling).
+# ROWFIX=1 runs the sibling cascade: thumb first, then preview with the repaired thumbnail as reference (in the search and for the
+# row-shift / DC post-processing), then orig with the repaired preview. Sequential, so slower than the default parallel run.
 # Requires ImageMagick (convert) and the Release build of dotnet/Jpegfix.
 set -e
 id=$1; src=${2:-real}; T=${3:-60}
@@ -12,26 +12,19 @@ id=$1; src=${2:-real}; T=${3:-60}
 dll=dotnet/Jpegfix/bin/Release/net10.0/Jpegfix.dll
 [ "$src" = synthetic ] && dir=testdata/synthetic || dir=testdata/gallery
 out=testdata/out; mkdir -p $out; w=$(mktemp -d)
-repair() {   # kind
-  local kind=$1 f=$dir/$1-$id.jpg
+repair() {   # kind [sibling repaired jpeg]
+  local kind=$1 sib=$2 f=$dir/$1-$id.jpg extra=""
   [ -f "$f" ] || return 0
+  [ -n "$sib" ] && [ -f "$sib" ] && extra="--rowfix --sibling $sib"
   dotnet $dll train $w/$kind.model $(ls testdata/gallery/$kind-*.jpg testdata/synthetic/$kind-*.jpg 2>/dev/null | grep -v -- "-$id.jpg") 2>/dev/null
   dotnet $dll corrupt "$f" $w/$kind.bad.jpg
-  ROWFIX=0 dotnet $dll repair $w/$kind.bad.jpg $w/$kind.fix.jpg --model $w/$kind.model --max-seconds $T 2>&1 | grep -E "STUCK|OK|WARNING|inserted" | tr '\n' ' ' | sed "s/^/$kind: /" >> $w/log || true
+  ROWFIX=0 dotnet $dll repair $w/$kind.bad.jpg $w/$kind.fix.jpg --model $w/$kind.model --max-seconds $T $extra 2>&1 | grep -E "STUCK|OK|WARNING|inserted|sibling" | tr '\n' ' ' | sed "s/^/$kind: /" >> $w/log || true
   echo >> $w/log
 }
-for k in thumb preview orig; do repair $k & done; wait
 if [ "${ROWFIX:-0}" = 1 ]; then
-  prev=""
-  for k in thumb preview orig; do
-    [ -f $w/$k.fix.jpg ] || continue
-    if [ -n "$prev" ]; then
-      dotnet $dll rowfix $w/$k.fix.jpg $w/$k.rf.jpg $dir/$k-$id.jpg $prev 2>&1 | sed "s/^/$k rowfix: /" >> $w/log || cp $w/$k.fix.jpg $w/$k.rf.jpg
-    fi
-    [ -f $w/$k.rf.jpg ] || cp $w/$k.fix.jpg $w/$k.rf.jpg
-    prev=$w/$k.rf.jpg
-  done
-  for k in thumb preview orig; do [ -f $w/$k.rf.jpg ] && mv $w/$k.rf.jpg $w/$k.fix.jpg; done
+  repair thumb; repair preview $w/thumb.fix.jpg; repair orig $w/preview.fix.jpg
+else
+  for k in thumb preview orig; do repair $k & done; wait
 fi
 row() {   # kind
   local kind=$1 f=$dir/$1-$id.jpg

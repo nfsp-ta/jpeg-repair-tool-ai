@@ -57,7 +57,14 @@ try
             var buf = File.ReadAllBytes(args[1]);
             var mp = Opt(args, "model"); var rf = Opt(args, "ref");
             int.TryParse(Opt(args, "beam"), out int beam); int.TryParse(Opt(args, "max-blocks"), out int maxBlocks); double.TryParse(Opt(args, "max-seconds"), out double maxSec);
-            var res = Repairer.Repair(buf, mp != null ? Model.Load(mp) : null, rf != null ? ToFloats(File.ReadAllBytes(rf)) : null, beam, maxBlocks, maxSeconds: maxSec);
+            float[]? refData = rf != null ? ToFloats(File.ReadAllBytes(rf)) : null;
+            float[]? sibRef = null;
+            if (Opt(args, "sibling") is string sibPath)       // a repaired smaller size of the same picture: reference for the search and for the post-processing
+            {
+                try { sibRef = Repairer.BuildReference(File.ReadAllBytes(sibPath), JpegParser.Parse(buf)); refData ??= sibRef; Console.Error.WriteLine("using sibling reference " + sibPath); }
+                catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { Console.Error.WriteLine("sibling reference unusable: " + ex.Message); }
+            }
+            var res = Repairer.Repair(buf, mp != null ? Model.Load(mp) : null, refData, beam, maxBlocks, maxSeconds: maxSec);
             var truth = Opt(args, "truth");
             if (truth != null)
             {
@@ -70,12 +77,6 @@ try
             if (res.StuckAt >= 0) Console.Error.WriteLine($"STUCK at block {res.StuckAt} - search ran out of plausible candidates; writing partial result");
             else Console.Error.WriteLine(res.Verified ? "OK: decode ends exactly at end of file (consistent)" : "WARNING: result is not consistent with end of file");
             var repaired = Repairer.BuildOutput(buf, res);
-            float[]? sibRef = null;
-            if (Opt(args, "sibling") is string sibPath)
-            {
-                try { sibRef = Repairer.BuildReference(File.ReadAllBytes(sibPath), res.J); Console.Error.WriteLine("using sibling reference " + sibPath); }
-                catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { Console.Error.WriteLine("sibling reference unusable: " + ex.Message); }
-            }
             if (RowFix.Enabled || args.Contains("--rowfix")) { repaired = RowFix.Apply(repaired, sibRef); Console.Error.WriteLine("row-shift correction and DC re-anchoring applied"); }
             File.WriteAllBytes(args[2], repaired);
             Console.Error.WriteLine($"inserted {res.List.Count} bytes");

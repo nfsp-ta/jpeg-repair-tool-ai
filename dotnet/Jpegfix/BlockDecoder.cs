@@ -189,8 +189,8 @@ sealed class BlockDecoder
         }
         if (RefY != null)
         {
-            if (bi < 4) { int bx = mx * 2 + (bi & 1), by = my * 2 + (bi >> 1); cost += Tunables.RefW * Math.Min(60, Math.Abs(dc / 8.0 + 128 - RefY[by * J.Mx * 2 + bx])); }
-            else cost += Tunables.RefW * Math.Min(60, Math.Abs(dc / 8.0 + 128 - (bi == 4 ? RefCb! : RefCr!)[my * J.Mx + mx]));
+            float rv = bi < 4 ? RefY[(my * 2 + (bi >> 1)) * J.Mx * 2 + mx * 2 + (bi & 1)] : (bi == 4 ? RefCb! : RefCr!)[my * J.Mx + mx];
+            if (!float.IsNaN(rv)) cost += Tunables.RefW * Math.Min(60, Math.Abs(dc / 8.0 + 128 - rv));      // NaN = the sibling is unknown here
         }
         R.Cost = cost > Tunables.Cap ? Tunables.Cap : cost;
         R.End = bp; R.Pred = pred; R.Dc = dc; R.DcBits = dcBits;

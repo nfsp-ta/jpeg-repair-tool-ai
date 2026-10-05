@@ -16,6 +16,27 @@ static class Bench
     }
 
     // Oracle reference from the clean sibling size. REF_OFF=1 keeps the sibling-only file selection but disables the reference (for A/B runs on identical files).
+    // REF_REPAIRED=1: the reference comes from the sibling repaired by stage 1 (as in a real run), not from the clean sibling.
+    static byte[]? RepairedOutput(List<Item> all, int j, LooModels loo, double maxSec)
+    {
+        try
+        {
+            string? sib = all[j].Kind == "orig" ? "preview" : all[j].Kind == "preview" ? "thumb" : null; float[]? rf = null;
+            if (sib != null && Corpus.Sibling(all, j, sib) is int s && s >= 0 && RepairedOutput(all, s, loo, maxSec) is byte[] so) rf = Repairer.BuildReference(so, all[j].J);
+            var bad = all[j].Good.Where(b => b != 0x0D).ToArray();
+            var res = Repairer.Repair(bad, loo.For(j), rf, 8, 0, quiet: true, maxSeconds: maxSec);
+            var o = Repairer.BuildOutput(bad, res);
+            return RowFix.Enabled ? RowFix.Apply(o, rf) : o;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { return null; }
+    }
+
+    static float[]? MakeRepairedRef(List<Item> all, int i, string refFrom, LooModels loo, double maxSec)
+    {
+        try { var o = RepairedOutput(all, Corpus.Sibling(all, i, refFrom), loo, maxSec); return o == null ? null : Repairer.BuildReference(o, all[i].J); }
+        catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException) { return null; }
+    }
+
     static float[]? MakeRef(List<Item> all, int i, string? refFrom) =>
         refFrom == null || Environment.GetEnvironmentVariable("REF_OFF") != null ? null : Repairer.BuildReference(all[Corpus.Sibling(all, i, refFrom)].Good, all[i].J);
 
@@ -94,7 +115,7 @@ static class Bench
             var row = new Row { Name = name, Kind = kind, Blocks = J.Blocks, Truth = truth.Count };
             try
             {
-                float[]? rf = MakeRef(all, i, refFrom);
+                float[]? rf = refFrom != null && Environment.GetEnvironmentVariable("REF_REPAIRED") == "1" ? MakeRepairedRef(all, i, refFrom, loo, maxSeconds) : MakeRef(all, i, refFrom);
                 var res = Repairer.Repair(bad, model, rf, beam, 0, quiet: true, maxSeconds: maxSeconds, truthKeys: Repairer.TruthKeys(good));
                 row.Survive = res.LostAt >= 0 ? (double)res.LostAt / J.Blocks : (res.StuckAt >= 0 ? (double)res.StuckAt / J.Blocks : 1.0);
                 row.Seconds = res.Seconds; row.Found = res.List.Count;
@@ -105,7 +126,7 @@ static class Bench
                 row.Matched = tt.Count(have.Contains); row.MatchedOf = tt.Count;
                 var outBytes = Repairer.BuildOutput(bad, res);
                 if (Environment.GetEnvironmentVariable("DUMP_DIR") is string dd) { Directory.CreateDirectory(dd); File.WriteAllBytes(Path.Combine(dd, name.Replace('/', '_')), outBytes); }
-                if (RowFix.Enabled) outBytes = RowFix.Apply(outBytes);
+                if (RowFix.Enabled) outBytes = RowFix.Apply(outBytes, rf);
                 row.Identical = outBytes.AsSpan().SequenceEqual(good);
                 Repairer.CompareBlocks(outBytes, good, out int pre, out int eq, out int tot, out int cl);
                 row.Prefix = (double)pre / tot; row.GoodBlocks = (double)eq / tot; row.CloseBlocks = (double)cl / tot;

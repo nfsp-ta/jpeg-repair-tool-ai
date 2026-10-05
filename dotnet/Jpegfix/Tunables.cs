@@ -12,7 +12,7 @@ static class Tunables
     public static readonly int Look = (int)Env("LOOK", 2);       // blocks of lookahead used to rank a hypothesis
     public static readonly double FailPen = Env("FAILPEN", 25);  // per un-decodable lookahead block
     public static readonly double InsPen = Env("INS_PEN", 40);    // cost charged per inserted byte
-    public static readonly double RefW = Env("REFW", 1);
+    public static readonly double RefW = Env("REFW", 2);
     public static readonly string Chroma = Environment.GetEnvironmentVariable("CHROMA") ?? "seam";  // chroma block score: dc | seam | both
     public static readonly bool PlainMetric = (Environment.GetEnvironmentVariable("METRIC") ?? "grad") == "plain";
 
