@@ -42,6 +42,14 @@ static class Bench
         int bw = Array.IndexOf(Repairer.GridWm, Tunables.WM), bl = Array.IndexOf(Repairer.GridLook, Tunables.Look), bp = Array.IndexOf(Repairer.GridPen, Tunables.InsPen);
         Console.WriteLine("\ntrue hypothesis wins (%), per block class, at the search defaults (W_M=" + Tunables.WM + " LOOK=" + Tunables.Look + " INS_PEN=" + Tunables.InsPen + "):");
         if (bw >= 0 && bl >= 0 && bp >= 0) for (int c = 0; c < 4; c++) Console.WriteLine($"  {cn[c],-24} {Pct(c, bw, bl, bp),5:F1}");
+        Console.WriteLine("\nlost blocks per file by MCU row, at the search defaults (blocks followed per file in brackets):");
+        string[] rn = { "row 0 ", "row 1 ", "row 2+" };
+        for (int r = 0; r < 3; r++)
+        {
+            long n = 0, e = 0; var parts = new List<string>();
+            for (int c = 0; c < 4; c++) { n += total.RowTotal[r, c]; e += total.RowTotal[r, c] - total.RowWins[r, c]; parts.Add(cn[c].Replace("needs-insertion", "ins").Replace("no-insertion", "none") + " " + (total.RowTotal[r, c] == 0 ? 0 : 100.0 * (total.RowTotal[r, c] - total.RowWins[r, c]) / total.RowTotal[r, c]).ToString("F1") + "% lost"); }
+            Console.WriteLine($"  {rn[r]} [{(double)n / Math.Max(1, total.Files),7:F0}]  lost/file {(double)e / Math.Max(1, total.Files),5:F2}  loss rate {(n == 0 ? 0 : 100.0 * e / n),5:F2}%   " + string.Join("; ", parts));
+        }
         double Err(int w, int l, int p) { long e = 0; for (int c = 0; c < 4; c++) e += total.Total[c] - total.Wins[c, w, l, p, bf]; return (double)e / Math.Max(1, total.Files); }
         Console.WriteLine("\nINS_PEN sweep (W_M=" + Repairer.GridWm[bw] + ", LOOK=" + Repairer.GridLook[bl] + "): % of blocks where the truth wins; ins = blocks needing an insertion, none = blocks without; err = lost blocks per file");
         Console.WriteLine("  pen    ins   none    err");
@@ -96,6 +104,8 @@ static class Bench
                 var tt = truth.Where(x => x <= last).ToList();
                 row.Matched = tt.Count(have.Contains); row.MatchedOf = tt.Count;
                 var outBytes = Repairer.BuildOutput(bad, res);
+                if (Environment.GetEnvironmentVariable("DUMP_DIR") is string dd) { Directory.CreateDirectory(dd); File.WriteAllBytes(Path.Combine(dd, name.Replace('/', '_')), outBytes); }
+                if (RowFix.Enabled) outBytes = RowFix.Apply(outBytes);
                 row.Identical = outBytes.AsSpan().SequenceEqual(good);
                 Repairer.CompareBlocks(outBytes, good, out int pre, out int eq, out int tot, out int cl);
                 row.Prefix = (double)pre / tot; row.GoodBlocks = (double)eq / tot; row.CloseBlocks = (double)cl / tot;

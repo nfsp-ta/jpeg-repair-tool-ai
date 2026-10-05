@@ -12,7 +12,7 @@ const string Usage = @"usage:
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
   jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N] [--ref-from KIND]\n  jpegfix makeref sibling.jpg target.jpg out.bin     (reference for --ref from a clean/repaired sibling size)
-  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S]";
+  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S] [--rowfix]";
 
 try
 {
@@ -43,6 +43,13 @@ try
             int.TryParse(Opt(args, "limit"), out int dl);
             if (!int.TryParse(Opt(args, "threads"), out int dt) || dt < 1) dt = Math.Max(1, Environment.ProcessorCount / 2);
             return Bench.RunDiag(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), dl, dt, Opt(args, "ref-from"));
+        case "perturb" when args.Length >= 2:
+            int.TryParse(Opt(args, "limit"), out int pl);
+            if (!int.TryParse(Opt(args, "threads"), out int pt) || pt < 1) pt = Math.Max(1, Environment.ProcessorCount / 2);
+            return Perturb.Run(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), pl, pt);
+        case "rowshift" when args.Length >= 4: return RowShift.Run(args[1], args[2], args[3]);
+        case "reencode" when args.Length >= 3: File.WriteAllBytes(args[2], CoefImage.Rewrite(File.ReadAllBytes(args[1]), null)); return 0;
+        case "rowfix" when args.Length >= 3: return RowFix.Run(args[1], args[2], args.Length > 3 ? args[3] : null);
         case "makeref" when args.Length >= 4:      // makeref sibling.jpg target.jpg out.bin
             File.WriteAllBytes(args[3], FloatBytes(Repairer.BuildReference(File.ReadAllBytes(args[1]), JpegParser.Parse(File.ReadAllBytes(args[2])))));
             return 0;
@@ -62,7 +69,9 @@ try
             }
             if (res.StuckAt >= 0) Console.Error.WriteLine($"STUCK at block {res.StuckAt} - search ran out of plausible candidates; writing partial result");
             else Console.Error.WriteLine(res.Verified ? "OK: decode ends exactly at end of file (consistent)" : "WARNING: result is not consistent with end of file");
-            File.WriteAllBytes(args[2], Repairer.BuildOutput(buf, res));
+            var repaired = Repairer.BuildOutput(buf, res);
+            if (RowFix.Enabled || args.Contains("--rowfix")) { repaired = RowFix.Apply(repaired); Console.Error.WriteLine("row-shift correction and DC re-anchoring applied"); }
+            File.WriteAllBytes(args[2], repaired);
             Console.Error.WriteLine($"inserted {res.List.Count} bytes");
             return res.Verified ? 0 : 1;
         default:

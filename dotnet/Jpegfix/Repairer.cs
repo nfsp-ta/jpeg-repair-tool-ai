@@ -86,7 +86,9 @@ sealed partial class Repairer
         var J = JpegParser.Parse(buf);
         var bad = JpegParser.Unstuff(buf, J.ScanStart, out int rawEnd);
         var rp = new Repairer(new BlockDecoder(J, model, refData), bad);
-        return rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds, truthKeys);
+        var res = rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds, truthKeys);
+        if (Tunables.Refine && maxBlocks <= 0) { var sw = System.Diagnostics.Stopwatch.StartNew(); var r2 = Refine(res, model, refData); r2.Seconds = res.Seconds + sw.Elapsed.TotalSeconds; r2.LostAt = res.LostAt; r2.TimedOut = res.TimedOut; res = r2; }
+        return res;
     }
 
     /// <summary>Decode state S under every insertion hypothesis (none, one byte at each offset, optionally two) and report each viable child via consider(S, windowStartByte, newInsertions). Block results are in dec.R during the callback.</summary>

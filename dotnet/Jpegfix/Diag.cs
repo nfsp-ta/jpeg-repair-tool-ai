@@ -16,12 +16,14 @@ sealed partial class Repairer
         public readonly long[,,,,] Wins = new long[Classes, GridWm.Length, GridLook.Length, GridPen.Length, GridFail.Length];
         public readonly long[] Total = new long[Classes];
         public readonly long[] Unreachable = new long[Classes];
+        public readonly long[,] RowTotal = new long[3, Classes], RowWins = new long[3, Classes];   // [MCU row 0 / 1 / 2+, class] at the search defaults
         public int Files, TruthInvalid;
         public void Add(DiagStats o)
         {
             for (int c = 0; c < Classes; c++)
             {
                 Total[c] += o.Total[c]; Unreachable[c] += o.Unreachable[c];
+                for (int r = 0; r < 3; r++) { RowTotal[r, c] += o.RowTotal[r, c]; RowWins[r, c] += o.RowWins[r, c]; }
                 for (int w = 0; w < GridWm.Length; w++) for (int l = 0; l < GridLook.Length; l++) for (int p = 0; p < GridPen.Length; p++) for (int f = 0; f < GridFail.Length; f++)
                     Wins[c, w, l, p, f] += o.Wins[c, w, l, p, f];
             }
@@ -82,6 +84,7 @@ sealed partial class Repairer
         var okArr = new int[2];
         int nw = GridWm.Length, nl = GridLook.Length, np = GridPen.Length;
         int nf = GridFail.Length;
+        int dw = Array.IndexOf(GridWm, Tunables.WM), dl = Array.IndexOf(GridLook, Tunables.Look), dp = Array.IndexOf(GridPen, Tunables.InsPen);
         var minC = new double[np * nf]; var minW = new double[np * nf];
 
         for (int n = 0; n < J.Blocks; n++)
@@ -99,6 +102,7 @@ sealed partial class Repairer
             var E = S.Clone(); E.K = zc[w0] + (startsInside ? 1 : 0); E.RLast = startsInside ? w0 : -1;
             int cls = (kTrue > E.K ? 0 : 2) + (bi < 4 ? 0 : 1);
             st.Total[cls]++;
+            int rowc = Math.Min(2, n / 6 / J.Mx); st.RowTotal[rowc, cls]++;
 
             cands.Clear();
             rp.Enumerate(E, true, baseW, win2, (S2, w0b, newIns) =>
@@ -143,7 +147,7 @@ sealed partial class Repairer
                         }
                     }
                 }
-                for (int p = 0; p < np; p++) for (int fi = 0; fi < nf; fi++) if (minC[p * nf + fi] < minW[p * nf + fi]) st.Wins[cls, wi, li, p, fi]++;
+                for (int p = 0; p < np; p++) for (int fi = 0; fi < nf; fi++) if (minC[p * nf + fi] < minW[p * nf + fi]) { st.Wins[cls, wi, li, p, fi]++; if (wi == dw && li == dl && p == dp && fi == 0) st.RowWins[rowc, cls]++; }
             }
             S = truthChild;
         }

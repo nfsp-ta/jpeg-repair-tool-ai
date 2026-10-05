@@ -29,6 +29,13 @@ static class Tunables
     public static readonly double BeamDelta = Env("BEAMDELTA", 80);
     public static readonly int BeamMax = (int)Env("BEAMMAX", 64);
 
+    // Stage 2 (Refine): edit the insertion list (move, drop, add near an existing insertion) when a window of S2WIN blocks scores better, with S2PEN per net insertion.
+    public static readonly bool Refine = Env("REFINE", 0) != 0;
+    public static readonly double S2Pen = Env("S2PEN", 5);
+    public static readonly int S2Win = (int)Env("S2WIN", 12);
+    public static readonly int S2Range = (int)Env("S2RANGE", 24);
+    public static readonly int S2Passes = (int)Env("S2PASSES", 3);
+
     public const int Win = 400;          // bytes of lookahead window per block decode
     public const double Cap = 60;        // cap on the cost of any single block
     public const double PairTrigger = 22;
