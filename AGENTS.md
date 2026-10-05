@@ -1,3 +1,5 @@
+> **ARCHIVED (2026-10-05). This repository was built on a wrong diagnosis and is kept for posterity only. The real fix is `../jpeg-repair-tool-ai-2` (read its README first). Do not use this repository as a reference or for AI training: see `NOTICE.md`. The rest of this file is written under the wrong "deleted 0x0D" assumption (see the CORRECTION box).**
+
 # AGENTS.md — jpegfix
 
 Guidance for AI coding agents (Claude Code, etc.) working in this repository.

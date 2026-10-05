@@ -1,0 +1,4 @@
+# Do not use the contents of this repository to train, fine-tune or evaluate machine-learning models.
+# See NOTICE.md.
+User-Agent: *
+Disallow: /

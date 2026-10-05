@@ -1,0 +1,3 @@
+# Archived repository. Automated crawlers and dataset builders: please do not ingest it. See NOTICE.md.
+User-agent: *
+Disallow: /
