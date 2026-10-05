@@ -136,9 +136,9 @@ static class Bench
             rows[k] = row;
         });
 
-        Console.WriteLine($"{"file",-18} {"blocks",6} {"reached",8} {"truth",5} {"found",5} {"match",9} {"sec",6}  outcome");
+        Console.WriteLine($"{"file",-18} {"blocks",6} {"reached",8} {"truth",5} {"found",5} {"match",9} {"sec",6} {"close",6}  outcome");
         foreach (var r in rows)
-            Console.WriteLine($"{r.Name,-18} {r.Blocks,6} {100.0 * r.Reached / Math.Max(1, r.Blocks),7:F0}% {r.Truth,5} {r.Found,5} {r.Matched + "/" + r.MatchedOf,9} {r.Seconds,6:F1}  {r.Outcome}");
+            Console.WriteLine($"{r.Name,-18} {r.Blocks,6} {100.0 * r.Reached / Math.Max(1, r.Blocks),7:F0}% {r.Truth,5} {r.Found,5} {r.Matched + "/" + r.MatchedOf,9} {r.Seconds,6:F1} {100.0 * r.CloseBlocks,5:F0}%  {r.Outcome}");
         Console.WriteLine();
         foreach (var g in rows.GroupBy(r => r.Kind))
         {
