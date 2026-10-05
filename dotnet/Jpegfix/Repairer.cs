@@ -59,15 +59,24 @@ sealed partial class Repairer
     static (int, int, int, int, int) Key(State S) =>
         (S.BitPos - 8 * S.K, (S.BitPos >> 3) == S.RLast ? (S.BitPos & 7) + 1 : 0, S.PY, S.PCb, S.PCr);
 
+    // selection score across parents
+    static double Sel(State S) => Tunables.LookW == 1 ? S.Rank : S.Cost + Tunables.LookW * (S.Rank - S.Cost);
+
     static List<State> Prune(List<State> arr, int W)
     {
-        var sorted = arr.OrderBy(s => s.Rank).ToList();      // stable, like JS Array.sort
+        IEnumerable<State> cand = arr.OrderBy(s => s.Rank);            // stable, like JS Array.sort
+        if (Tunables.PerParent < arr.Count)
+        {
+            var perParent = new Dictionary<int, int>();
+            cand = cand.Where(s => { perParent.TryGetValue(s.Origin, out int c); perParent[s.Origin] = c + 1; return c < Tunables.PerParent; }).ToList();
+        }
+        var sorted = (Tunables.LookW == 1 ? cand : cand.OrderBy(Sel)).ToList();
         var seen = new HashSet<(int, int, int, int, int)>(); var outList = new List<State>();
         foreach (var S in sorted)
         {
             if (!seen.Add(Key(S))) continue;
+            if (outList.Count >= W && (Tunables.BeamDelta <= 0 || outList.Count >= Tunables.BeamMax || Sel(S) - Sel(outList[0]) > Tunables.BeamDelta)) break;
             outList.Add(S);
-            if (outList.Count >= W) break;
         }
         return outList;
     }
@@ -133,21 +142,25 @@ sealed partial class Repairer
         for (int n = 0; n < total; n++)
         {
             var next = new List<State>(); double cutoff = double.PositiveInfinity;
+            int bw = n < J.Mx * 6 * Tunables.FirstRows ? beamW * Tunables.FirstMul : beamW;
+            var originOf = new Dictionary<State, int>(ReferenceEqualityComparer.Instance);
+            for (int bi2 = 0; bi2 < beam.Count; bi2++) originOf[beam[bi2]] = bi2;
             var dbgAll = lostDebug && lostAt < 0 ? new List<(State C, int Ins)>() : null;
             void Consider(State S, int w0, int[] newIns)
             {
                 var C = dec.MakeChild(S, w0, newIns);
                 C.Rank = C.Cost + (Tunables.Look > 0 ? LookFrom(C, Tunables.Look) : 0);
+                C.Origin = originOf.TryGetValue(S, out int oi) ? oi : 0;
                 dbgAll?.Add((C, newIns.Length));
-                if (C.Rank >= cutoff) return;
+                if (Sel(C) >= cutoff) return;
                 next.Add(C);
-                if (next.Count >= beamW * 4) { next = Prune(next, beamW); cutoff = next[^1].Rank; }
+                if (next.Count >= (Tunables.BeamDelta > 0 ? Tunables.BeamMax * 2 : bw * 4)) { next = Prune(next, bw); cutoff = Sel(next[^1]); }
             }
 
             for (int rank = 0; rank < beam.Count; rank++)
                 Enumerate(beam[rank], rank < Tunables.PairRank, baseW, win2, Consider);
 
-            next = Prune(next, beamW);
+            next = Prune(next, bw);
             if (next.Count == 0) { stuckAt = n; break; }
             beam = next;
             if (truthKeys != null && lostAt < 0 && n < truthKeys.Count && !beam.Any(s => Key(s) == truthKeys[n]))
@@ -156,8 +169,9 @@ sealed partial class Repairer
                 if (dbgAll != null)
                 {
                     var sorted = dbgAll.OrderBy(x => x.C.Rank).ToList(); int tr = sorted.FindIndex(x => Key(x.C) == truthKeys[n]);
-                    Console.Error.WriteLine($"LOST n={n} bi={n % 6} mcu={n / 6} cands={sorted.Count} trueRank={(tr < 0 ? "absent" : (tr + 1).ToString())}" +
-                        (tr >= 0 ? $" gap={sorted[tr].C.Rank - sorted[0].C.Rank:F1} trueIns={sorted[tr].Ins} bestIns={sorted[0].Ins}" : $" bestIns={sorted[0].Ins}"));
+                    var bst = sorted[0].C;
+                    string extra = tr < 0 ? "" : $" Ktrue={sorted[tr].C.K} Kbest={bst.K} gapIns={Tunables.InsPen * (sorted[tr].C.K - bst.K):F0} gapEvidence={sorted[tr].C.Rank - bst.Rank - Tunables.InsPen * (sorted[tr].C.K - bst.K):F0} (accumulated {sorted[tr].C.Cost - bst.Cost - Tunables.InsPen * (sorted[tr].C.K - bst.K):F0}, lookahead {(sorted[tr].C.Rank - sorted[tr].C.Cost) - (bst.Rank - bst.Cost):F0})";
+                    Console.Error.WriteLine($"LOST n={n} bi={n % 6} mcu={n / 6} cands={sorted.Count} trueRank={(tr < 0 ? "absent" : (tr + 1).ToString())}" + (tr >= 0 ? $" gap={sorted[tr].C.Rank - bst.Rank:F1}" : "") + extra);
                 }
             }
             if (maxSeconds > 0 && sw.Elapsed.TotalSeconds > maxSeconds) { stuckAt = n + 1; timedOut = true; break; }

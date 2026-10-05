@@ -9,7 +9,7 @@ sealed class InsNode
 /// <summary>One beam state. Arrays are never mutated after a state is created (children copy on write).</summary>
 sealed class State
 {
-    public int N, BitPos, K, RLast;
+    public int N, BitPos, K, RLast, Origin;      // Origin: index of the parent in the previous beam
     public double Rank, Cost;
     public int PY, PCb, PCr;
     public InsNode? Ins;
