@@ -3,6 +3,33 @@
 Guidance for AI coding agents (Claude Code, etc.) working in this repository.
 Read this whole file before changing anything; it records what has been learned so far so it is not re-discovered.
 
+## RESUME HERE (state at end of session 1, 2026-10-04)
+
+**Where we are.** The C# port (`dotnet/Jpegfix/`) is the working implementation; `jpegfix.js` is the frozen original prototype. With the current defaults (`W_M=1 LOOK=2 INS_PEN=40 LOOKW=0.25 BEAMDELTA=80 BEAMMAX=64`, `CHROMA=seam`, beam 8) thumbnails mostly repair cleanly (`tools/preview.sh 2924 real` shows an exact thumbnail), and mediums/originals come out nearly complete and recognisable but with (a) a chunk displaced horizontally after a missed byte and (b) a colour cast (DC offset persisting after a missed byte). Byte-exact repair is still rare (a few % of thumbnails, ~0 for larger sizes). Everything is committed; last push was `d05bdaa`, later commits are local only.
+
+**How to look at it / measure it**
+- Visual: `tools/preview.sh <id> real|synthetic [seconds]` -> `testdata/out/<id>-<src>.png`. Real triplet ids: 1451 1593 2915 2924 3285 4388.
+- Metrics: `bench` (reports **true state kept** and **visually close blocks**, which are the numbers to optimise; "blocks reached"/"truth matched" mislead), `diag` (per-block scorer test with true history), `LOST_DEBUG=1` (why the true lineage was dropped), `--ref-from` (oracle sibling reference), `REF_OFF=1`, `EVAL_FIRST_DIR=1`.
+- Data: `testdata/gallery` (513 real clean files from the Wayback Machine, fetched by `tools/fetch-testdata.js`), `testdata/synthetic` (triplets made by `tools/make-synthetic-triplets.sh`), `testdata/overnight/` (extra car photos, see below). All git-ignored except the single IMAG0705 pair.
+
+**Learned this session (details in the sections above)**
+1. Constants barely differ by image size; `W_M=1` is a safe common value; thumbnails need a same-size statistics model, larger sizes do not care.
+2. A perfect coarse sibling reference does NOT keep the true path in the beam (oracle experiment). It stops drift but is not the first lever.
+3. The true lineage is lost mostly through the lookahead bias across lineages and in the first MCU row; fixed in part by `LOOKW` and the adaptive beam (`BEAMDELTA`).
+4. A row-shift check cannot work in row 0 (no row above) and was deliberately not built before the data said where losses occur.
+
+**Next steps, in order**
+1. Row-boundary shift check + DC re-anchoring (the two visible residuals above): at the end of each MCU row compare the row's top edge with the row above at horizontal shifts of a few MCUs, and flag lineages whose best alignment is not 0; use a sibling reference (oracle first, then a repaired thumbnail via `makeref`) to pull DC predictors back after a miss.
+2. Backtracking when the search is STUCK or ends inconsistent (both are detectable; stuck near the end was seen on 2924).
+3. First-row problem: blocks in row 0 only have a left neighbour; consider a stronger prior or decoding bottom-up/backwards for the first rows.
+4. Restart-marker files (9 of the Wayback files) are rejected by the parser but should be easier; the real damaged files may have them.
+5. Header repair (graft a known-good header), pair/triple-insertion search trigger (~1% of insertion blocks unreachable), joint three-file search (see "Idea" section).
+6. Speed: the adaptive beam is 2-3.5x slower than beam 8; profile `EvalBlock`/`MakeChild` allocations before porting more.
+
+**Overnight job (optional).** `tools/overnight.sh` fetches ~400 extra car photos from Wikimedia Commons, builds synthetic triplets and sweeps the constants one at a time on hundreds of files (our mediums/originals samples are only 8-25 files, so current tuning is noisy), then validates the best setting on the real gallery files. Start it with `nohup tools/overnight.sh > testdata/overnight/run.log 2>&1 &` (preferably under `systemd-inhibit --what=sleep`); results land in `testdata/overnight/summary.md`. `SMOKE=1` runs a ~5 minute end-to-end test. The job only measures; it never changes code defaults.
+
+**Gotchas.** Do not rebuild the C# project while a background benchmark is running. `bench` time limits (`--max-seconds`) truncate large files, so compare runs with the same limit. In shell one-liners avoid `pkill -f <pattern>` (it matches the calling shell) and `python3 -` (waits on stdin). Quote JS in `node -e` carefully (single quotes inside C# text get eaten).
+
 ## Project goal
 
 Repair thousands of JPEG images (a car-club forum gallery) damaged by a bad FTP transfer that **deleted every `0x0D` byte** from the file and otherwise left all bytes intact. Bytes were *dropped* (file gets shorter), not replaced.
@@ -26,6 +53,7 @@ Repair thousands of JPEG images (a car-club forum gallery) damaged by a bad FTP 
 | `tools/fetch-testdata.js` | Downloads clean gallery JPEGs from the Wayback Machine into `testdata/gallery/` (git-ignored; names `thumb-<id>.jpg`, `preview-<id>.jpg`, `orig-<id>.jpg`). Resumable. Use HTTPS: plain HTTP is intercepted by some home-network filters. |
 | `tools/make-synthetic-triplets.sh` | Builds synthetic orig/preview/thumb triplets (into git-ignored `testdata/synthetic/`) from the clean originals using ImageMagick `convert`, which is already installed and uses libjpeg. Settings match the forum encoder (gd-jpeg / IJG libjpeg): q95, 4:2:0, standard Huffman tables (`-define jpeg:optimize-coding=false`), no restart markers. DQT/SOF/DHT segments verified byte-identical to the real files; resampling filter only approximate (real thumbs ~ Lanczos size, real mediums between Mitchell and Lanczos). No JPEG encoder needs writing. |
 | `tools/preview.sh` | `tools/preview.sh <id> [real|synthetic] [max-seconds]` corrupts each size of one image, repairs it with a leave-one-out model, and writes `testdata/out/<id>-<real|synthetic>.png` (rows: original size on top, medium, thumbnail; columns: damaged | repaired | original). Quick visual progress check. Real triplet ids: 1451 1593 2915 2924 3285 4388. |
+| `tools/fetch-commons.js`, `tools/make-synthetic-triplets.sh`, `tools/overnight.sh`, `tools/summarize-overnight.js` | Unattended benchmark pipeline: extra clean car photos from Wikimedia Commons -> synthetic triplets -> parameter sweeps -> ranked `summary.md`. See RESUME HERE. |
 | `AGENTS.md` | This file. |
 | `testdata/` (suggested) | Put `IMAG0705_good.jpg` / `IMAG0705_bad.jpg` here (1024×768 original and its corrupted twin). Not generated by code. |
 

@@ -10,8 +10,8 @@ src=${1:-testdata/gallery}; out=${2:-testdata/synthetic}; mkdir -p "$out"
 opts=(-quality 95 -sampling-factor 2x2,1x1,1x1 -define jpeg:optimize-coding=false -strip)
 for f in "$src"/orig-*.jpg; do
   id=$(basename "$f" .jpg); id=${id#orig-}
-  convert "$f" "${opts[@]}" "$out/orig-$id.jpg"
-  convert "$f" -filter Lanczos -resize 640x640 "${opts[@]}" "$out/preview-$id.jpg"
-  convert "$f" -filter Lanczos -resize 120x120 "${opts[@]}" "$out/thumb-$id.jpg"
+  convert "$f" -resize '1024x1024>' "${opts[@]}" "$out/orig-$id.jpg"
+  convert "$f" -resize '1024x1024>' -filter Lanczos -resize 640x640 "${opts[@]}" "$out/preview-$id.jpg"
+  convert "$f" -resize '1024x1024>' -filter Lanczos -resize 120x120 "${opts[@]}" "$out/thumb-$id.jpg"
 done
 echo "wrote $(ls "$out" | wc -l) files to $out"

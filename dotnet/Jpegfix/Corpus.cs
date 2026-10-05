@@ -29,7 +29,8 @@ static class Corpus
     /// <summary>Indices of the items to evaluate: those of the given kind, thinned to an evenly spread sample of <paramref name="limit"/>.</summary>
     public static List<int> Pick(List<Item> all, string? kind, int limit, string? refFrom = null)
     {
-        var idx = Enumerable.Range(0, all.Count).Where(i => (kind == null || all[i].Kind == kind) && (refFrom == null || Sibling(all, i, refFrom) >= 0)).ToList();
+        bool firstOnly = Environment.GetEnvironmentVariable("EVAL_FIRST_DIR") != null;      // evaluate only files from the first listed directory (the others still train the model)
+        var idx = Enumerable.Range(0, all.Count).Where(i => (kind == null || all[i].Kind == kind) && (refFrom == null || Sibling(all, i, refFrom) >= 0) && (!firstOnly || !all[i].Name.Contains('/'))).ToList();
         if (limit > 0 && idx.Count > limit) idx = Enumerable.Range(0, limit).Select(i => idx[(int)((long)i * idx.Count / limit)]).ToList();
         return idx;
     }
