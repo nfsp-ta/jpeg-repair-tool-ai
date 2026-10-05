@@ -22,10 +22,14 @@ static class Corpus
         return items;
     }
 
+    /// <summary>Index of the item showing the same image at size <paramref name="kind"/> from the same source (real vs synthetic directory), or -1.</summary>
+    public static int Sibling(List<Item> all, int i, string kind) =>
+        all.FindIndex(o => o.Kind == kind && o.Id == all[i].Id && o.Name.Contains('/') == all[i].Name.Contains('/'));
+
     /// <summary>Indices of the items to evaluate: those of the given kind, thinned to an evenly spread sample of <paramref name="limit"/>.</summary>
-    public static List<int> Pick(List<Item> all, string? kind, int limit)
+    public static List<int> Pick(List<Item> all, string? kind, int limit, string? refFrom = null)
     {
-        var idx = Enumerable.Range(0, all.Count).Where(i => kind == null || all[i].Kind == kind).ToList();
+        var idx = Enumerable.Range(0, all.Count).Where(i => (kind == null || all[i].Kind == kind) && (refFrom == null || Sibling(all, i, refFrom) >= 0)).ToList();
         if (limit > 0 && idx.Count > limit) idx = Enumerable.Range(0, limit).Select(i => idx[(int)((long)i * idx.Count / limit)]).ToList();
         return idx;
     }

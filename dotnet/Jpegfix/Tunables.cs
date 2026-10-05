@@ -9,9 +9,9 @@ static class Tunables
         double.TryParse(Environment.GetEnvironmentVariable(name), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : def;
 
     public static readonly double WM = Env("W_M", 1);          // weight of the coefficient-statistics term
-    public static readonly int Look = (int)Env("LOOK", 4);       // blocks of lookahead used to rank a hypothesis
+    public static readonly int Look = (int)Env("LOOK", 2);       // blocks of lookahead used to rank a hypothesis
     public static readonly double FailPen = Env("FAILPEN", 25);  // per un-decodable lookahead block
-    public static readonly double InsPen = Env("INS_PEN", 20);    // cost charged per inserted byte
+    public static readonly double InsPen = Env("INS_PEN", 40);    // cost charged per inserted byte
     public static readonly double RefW = Env("REFW", 1);
     public static readonly string Chroma = Environment.GetEnvironmentVariable("CHROMA") ?? "seam";  // chroma block score: dc | seam | both
     public static readonly bool PlainMetric = (Environment.GetEnvironmentVariable("METRIC") ?? "grad") == "plain";

@@ -2,6 +2,8 @@ using Jpegfix;
 
 static string? Opt(string[] a, string name) { int i = Array.IndexOf(a, "--" + name); return i >= 0 && i + 1 < a.Length ? a[i + 1] : null; }
 
+static byte[] FloatBytes(float[] f) { var b = new byte[f.Length * 4]; Buffer.BlockCopy(f, 0, b, 0, b.Length); return b; }
+
 static float[] ToFloats(byte[] b) { var f = new float[b.Length / 4]; Buffer.BlockCopy(b, 0, f, 0, f.Length * 4); return f; }
 
 const string Usage = @"usage:
@@ -9,7 +11,8 @@ const string Usage = @"usage:
   jpegfix verify  a.jpg b.jpg
   jpegfix train   model.json clean1.jpg [clean2.jpg ...]
   jpegfix bench   dir [--beam N] [--max-seconds S] [--scope kind|all|none] [--kind thumb|preview|orig] [--limit N] [--threads N]
-  jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N]\n  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S]";
+  jpegfix diag    dir [--scope kind|all|none] [--kind K] [--limit N] [--threads N] [--ref-from KIND]\n  jpegfix makeref sibling.jpg target.jpg out.bin     (reference for --ref from a clean/repaired sibling size)
+  jpegfix repair  bad.jpg out.jpg [--beam N] [--model model.json] [--ref ref.bin] [--truth good.jpg] [--max-blocks N] [--max-seconds S]";
 
 try
 {
@@ -35,11 +38,14 @@ try
         case "bench" when args.Length >= 2:
             int.TryParse(Opt(args, "beam"), out int bb); double.TryParse(Opt(args, "max-seconds"), out double ms); int.TryParse(Opt(args, "limit"), out int lim);
             if (!int.TryParse(Opt(args, "threads"), out int th) || th < 1) th = Math.Max(1, Environment.ProcessorCount / 2);
-            return Bench.Run(args[1], bb > 0 ? bb : 8, ms > 0 ? ms : 120, Opt(args, "scope") ?? "kind", Opt(args, "kind"), lim, th);
+            return Bench.Run(args[1], bb > 0 ? bb : 8, ms > 0 ? ms : 120, Opt(args, "scope") ?? "kind", Opt(args, "kind"), lim, th, Opt(args, "ref-from"));
         case "diag" when args.Length >= 2:
             int.TryParse(Opt(args, "limit"), out int dl);
             if (!int.TryParse(Opt(args, "threads"), out int dt) || dt < 1) dt = Math.Max(1, Environment.ProcessorCount / 2);
-            return Bench.RunDiag(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), dl, dt);
+            return Bench.RunDiag(args[1], Opt(args, "scope") ?? "kind", Opt(args, "kind"), dl, dt, Opt(args, "ref-from"));
+        case "makeref" when args.Length >= 4:      // makeref sibling.jpg target.jpg out.bin
+            File.WriteAllBytes(args[3], FloatBytes(Repairer.BuildReference(File.ReadAllBytes(args[1]), JpegParser.Parse(File.ReadAllBytes(args[2])))));
+            return 0;
         case "repair" when args.Length >= 3:
             var buf = File.ReadAllBytes(args[1]);
             var mp = Opt(args, "model"); var rf = Opt(args, "ref");

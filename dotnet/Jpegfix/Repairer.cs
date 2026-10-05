@@ -10,6 +10,7 @@ sealed class RepairResult
     public int StuckAt = -1;
     public bool TimedOut;
     public double Seconds;
+    public int LostAt = -1;      // first block after which no beam state matched the true decoder state (needs truth keys); -1 = never lost / unknown
     public int Total;
 }
 
@@ -71,12 +72,12 @@ sealed partial class Repairer
         return outList;
     }
 
-    public static RepairResult Repair(byte[] buf, Model? model, float[]? refData, int beamW, int maxBlocks, bool quiet = false, double maxSeconds = 0)
+    public static RepairResult Repair(byte[] buf, Model? model, float[]? refData, int beamW, int maxBlocks, bool quiet = false, double maxSeconds = 0, List<(int, int, int, int, int)>? truthKeys = null)
     {
         var J = JpegParser.Parse(buf);
         var bad = JpegParser.Unstuff(buf, J.ScanStart, out int rawEnd);
         var rp = new Repairer(new BlockDecoder(J, model, refData), bad);
-        return rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds);
+        return rp.Run(rawEnd, beamW <= 0 ? 8 : beamW, maxBlocks, quiet, maxSeconds, truthKeys);
     }
 
     /// <summary>Decode state S under every insertion hypothesis (none, one byte at each offset, optionally two) and report each viable child via consider(S, windowStartByte, newInsertions). Block results are in dec.R during the callback.</summary>
@@ -120,22 +121,24 @@ sealed partial class Repairer
         }
     }
 
-    RepairResult Run(int rawEnd, int beamW, int maxBlocks, bool quiet, double maxSeconds)
+    RepairResult Run(int rawEnd, int beamW, int maxBlocks, bool quiet, double maxSeconds, List<(int, int, int, int, int)>? truthKeys)
     {
         int total = Math.Min(J.Blocks, maxBlocks > 0 ? maxBlocks : J.Blocks);
         var R = dec.R;
         var baseW = new byte[Win + 8]; var win2 = new byte[Win + 8];
         var beam = new List<State> { dec.InitialState() };
-        int stuckAt = -1; bool timedOut = false;
+        int stuckAt = -1; bool timedOut = false; int lostAt = -1; bool lostDebug = Environment.GetEnvironmentVariable("LOST_DEBUG") != null;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         for (int n = 0; n < total; n++)
         {
             var next = new List<State>(); double cutoff = double.PositiveInfinity;
+            var dbgAll = lostDebug && lostAt < 0 ? new List<(State C, int Ins)>() : null;
             void Consider(State S, int w0, int[] newIns)
             {
                 var C = dec.MakeChild(S, w0, newIns);
                 C.Rank = C.Cost + (Tunables.Look > 0 ? LookFrom(C, Tunables.Look) : 0);
+                dbgAll?.Add((C, newIns.Length));
                 if (C.Rank >= cutoff) return;
                 next.Add(C);
                 if (next.Count >= beamW * 4) { next = Prune(next, beamW); cutoff = next[^1].Rank; }
@@ -147,6 +150,16 @@ sealed partial class Repairer
             next = Prune(next, beamW);
             if (next.Count == 0) { stuckAt = n; break; }
             beam = next;
+            if (truthKeys != null && lostAt < 0 && n < truthKeys.Count && !beam.Any(s => Key(s) == truthKeys[n]))
+            {
+                lostAt = n + 1;
+                if (dbgAll != null)
+                {
+                    var sorted = dbgAll.OrderBy(x => x.C.Rank).ToList(); int tr = sorted.FindIndex(x => Key(x.C) == truthKeys[n]);
+                    Console.Error.WriteLine($"LOST n={n} bi={n % 6} mcu={n / 6} cands={sorted.Count} trueRank={(tr < 0 ? "absent" : (tr + 1).ToString())}" +
+                        (tr >= 0 ? $" gap={sorted[tr].C.Rank - sorted[0].C.Rank:F1} trueIns={sorted[tr].Ins} bestIns={sorted[0].Ins}" : $" bestIns={sorted[0].Ins}"));
+                }
+            }
             if (maxSeconds > 0 && sw.Elapsed.TotalSeconds > maxSeconds) { stuckAt = n + 1; timedOut = true; break; }
             if (!quiet && (n % 1500 == 0 || n == total - 1))
                 Console.Error.WriteLine($"block {n + 1}/{total}  best cost {beam[0].Cost:F0}  insertions {beam[0].K}  ({sw.Elapsed.TotalSeconds:F1}s)");
@@ -162,7 +175,7 @@ sealed partial class Repairer
         bool verified = winner != null && stuckAt < 0 && total == J.Blocks;
         winner ??= beam[0];
         var list = new List<int>(); for (var nd = winner.Ins; nd != null; nd = nd.Prev) list.Add(nd.Bad); list.Reverse();
-        return new RepairResult { J = J, Bad = bad, RawEnd = rawEnd, List = list, Verified = verified, StuckAt = stuckAt, TimedOut = timedOut, Seconds = sw.Elapsed.TotalSeconds, Total = total };
+        return new RepairResult { J = J, Bad = bad, RawEnd = rawEnd, List = list, Verified = verified, StuckAt = stuckAt, TimedOut = timedOut, LostAt = lostAt, Seconds = sw.Elapsed.TotalSeconds, Total = total };
     }
 
     /// <summary>Train the statistics model on a clean JPEG by decoding it sequentially.</summary>
